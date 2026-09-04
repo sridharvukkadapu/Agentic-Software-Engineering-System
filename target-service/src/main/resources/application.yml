@@ -2,7 +2,7 @@ spring:
   application:
     name: target-service
   datasource:
-    url: jdbc:postgresql://localhost:5432/urlshortener
+    url: jdbc:postgresql://localhost:5433/urlshortener
     username: urlshortener
     password: urlshortener
   jpa:
