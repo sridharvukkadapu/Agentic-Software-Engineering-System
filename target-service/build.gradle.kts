@@ -19,7 +19,7 @@ repositories {
     mavenCentral()
 }
 
-extra["testcontainersVersion"] = "1.20.1"
+extra["testcontainersVersion"] = "1.21.4"
 
 dependencies {
     implementation("org.springframework.boot:spring-boot-starter-web")
@@ -30,6 +30,7 @@ dependencies {
     runtimeOnly("org.postgresql:postgresql")
 
     testImplementation("org.springframework.boot:spring-boot-starter-test")
+    testImplementation("org.springframework.boot:spring-boot-testcontainers")
     testImplementation("org.testcontainers:junit-jupiter")
     testImplementation("org.testcontainers:postgresql")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
@@ -43,6 +44,14 @@ dependencyManagement {
 
 tasks.withType<Test> {
     useJUnitPlatform()
+
+    // Docker Desktop on macOS does not always expose /var/run/docker.sock, and
+    // Testcontainers' own auto-detection of the Desktop socket can fail to resolve it.
+    // Forward DOCKER_HOST from the invoking shell into the forked test JVM explicitly,
+    // since Gradle's Test task does not inherit it automatically.
+    System.getenv("DOCKER_HOST")?.let { dockerHost ->
+        environment("DOCKER_HOST", dockerHost)
+    }
 }
 
 tasks.named<BootJar>("bootJar") {
