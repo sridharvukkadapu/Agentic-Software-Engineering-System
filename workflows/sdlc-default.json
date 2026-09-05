@@ -1,0 +1,92 @@
+{
+  "nodes": [
+    {
+      "id": "REQUIREMENT",
+      "name": "Requirement analysis",
+      "executor": "requirement",
+      "dependsOn": [],
+      "entryGate": "dependencies-complete",
+      "exitGate": "artifact-written",
+      "riskLevel": "LOW",
+      "maxAttempts": 2,
+      "producesEvidenceFor": []
+    },
+    {
+      "id": "IMPACT",
+      "name": "Impact analysis",
+      "executor": "impact",
+      "dependsOn": ["REQUIREMENT"],
+      "entryGate": "dependencies-complete",
+      "exitGate": "artifact-written",
+      "riskLevel": "MEDIUM",
+      "maxAttempts": 2,
+      "producesEvidenceFor": []
+    },
+    {
+      "id": "DESIGN",
+      "name": "Design",
+      "executor": "design",
+      "dependsOn": ["IMPACT"],
+      "entryGate": "requirement-unambiguous-or-approved",
+      "exitGate": "artifact-written",
+      "riskLevel": "MEDIUM",
+      "maxAttempts": 2,
+      "producesEvidenceFor": []
+    },
+    {
+      "id": "IMPLEMENT",
+      "name": "Implementation",
+      "executor": "implement",
+      "dependsOn": ["DESIGN"],
+      "entryGate": "checkpoint-exists",
+      "exitGate": "compiles",
+      "riskLevel": "HIGH",
+      "maxAttempts": 3,
+      "producesEvidenceFor": ["compiles"]
+    },
+    {
+      "id": "TEST",
+      "name": "Test generation",
+      "executor": "test",
+      "dependsOn": ["DESIGN"],
+      "entryGate": "dependencies-complete",
+      "exitGate": "tests-pass",
+      "riskLevel": "MEDIUM",
+      "maxAttempts": 3,
+      "producesEvidenceFor": ["tests-pass"]
+    },
+    {
+      "id": "DOCUMENT",
+      "name": "Documentation",
+      "executor": "document",
+      "dependsOn": ["DESIGN"],
+      "entryGate": "dependencies-complete",
+      "exitGate": "artifact-written",
+      "riskLevel": "LOW",
+      "maxAttempts": 2,
+      "producesEvidenceFor": []
+    },
+    {
+      "id": "VALIDATE",
+      "name": "Validation",
+      "executor": "validate",
+      "dependsOn": ["IMPLEMENT", "TEST", "DOCUMENT"],
+      "entryGate": "dependencies-complete",
+      "exitGate": "evidence-complete",
+      "riskLevel": "HIGH",
+      "maxAttempts": 2,
+      "producesEvidenceFor": []
+    },
+    {
+      "id": "RELEASE",
+      "name": "Release readiness",
+      "executor": "release",
+      "dependsOn": ["VALIDATE"],
+      "entryGate": "dependencies-complete",
+      "exitGate": "executed-evidence-for-high-risk",
+      "riskLevel": "CRITICAL",
+      "maxAttempts": 1,
+      "producesEvidenceFor": []
+    }
+  ]
+}
