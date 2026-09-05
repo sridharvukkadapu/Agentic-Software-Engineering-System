@@ -12,11 +12,12 @@ import java.util.Map;
  * {@code graph} lets a gate reason about dependencies or graph shape.
  * {@code targetServiceDirectory} is where the target service working tree lives, for
  * gates that check the filesystem or run a build. {@code runsDirectory} is the root
- * under which this run's checkpoints and artifacts live, so the {@code checkpoint-exists}
- * gate can check for a checkpoint without guessing a path relative to the target service
- * directory. {@code commandRunner}, {@code buildCommand} and {@code testCommand} are
- * what the {@code compiles} and {@code tests-pass} gates use to actually invoke a real
- * command rather than assuming one succeeded.
+ * under which this run's checkpoints and artifacts live, so the
+ * {@code checkpointing-configured} gate can check whether checkpointing is wired up for
+ * this run without guessing a path relative to the target service directory.
+ * {@code commandRunner}, {@code buildCommand} and {@code testCommand} are what the
+ * {@code compiles} and {@code tests-pass} gates use to actually invoke a real command
+ * rather than assuming one succeeded.
  */
 public record GateContext(
     Map<String, Object> executorOutputs,

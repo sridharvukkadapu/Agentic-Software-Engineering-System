@@ -91,7 +91,7 @@ public class WorkflowEngineTest {
         Path mutableFile = targetServiceDir.resolve("Service.java");
         Files.writeString(mutableFile, "original content");
 
-        WorkflowNode node = TestEngineFixtures.node("N1", Set.of(), 1);
+        WorkflowNode node = TestEngineFixtures.nodeWithWritePaths("N1", Set.of(), 1, Set.of("Service.java"));
         WorkflowGraph graph = WorkflowGraph.of(List.of(node));
         WorkflowState state = new WorkflowState("RUN-1", TestEngineFixtures.requirementSpec(), graph.getAllNodes());
 
@@ -134,7 +134,7 @@ public class WorkflowEngineTest {
         Path mutableFile = targetServiceDir.resolve("Service.java");
         Files.writeString(mutableFile, "original content");
 
-        WorkflowNode node = TestEngineFixtures.node("N1", Set.of(), 1);
+        WorkflowNode node = TestEngineFixtures.nodeWithWritePaths("N1", Set.of(), 1, Set.of("Service.java"));
         WorkflowGraph graph = WorkflowGraph.of(List.of(node));
         WorkflowState state = new WorkflowState("RUN-1", TestEngineFixtures.requirementSpec(), graph.getAllNodes());
 
@@ -175,12 +175,12 @@ public class WorkflowEngineTest {
         Path targetServiceDir = Files.createTempDirectory("engine-target-service");
         Path runsDir = Files.createTempDirectory("engine-runs");
 
-        WorkflowNode nodeA = TestEngineFixtures.node("A", Set.of(), 1);
-        WorkflowNode nodeB = TestEngineFixtures.node("B", Set.of("A"), 1);
+        WorkflowNode nodeA = TestEngineFixtures.nodeWithWritePaths("A", Set.of(), 1, Set.of("a-dir"));
+        WorkflowNode nodeB = TestEngineFixtures.nodeWithWritePaths("B", Set.of("A"), 1, Set.of("b-dir"));
         WorkflowGraph graph = WorkflowGraph.of(List.of(nodeA, nodeB));
         WorkflowState state = new WorkflowState("RUN-1", TestEngineFixtures.requirementSpec(), graph.getAllNodes());
 
-        Path artifactForA = targetServiceDir.resolve("a-artifact.txt");
+        Path artifactForA = targetServiceDir.resolve("a-dir/a-artifact.txt");
         String aContent = "A's real, completed output, must survive B's rollback";
         ControllableExecutor executor = new ControllableExecutor();
         executor.alwaysReturn("A", ControllableExecutor.Outcome.success("A completes", artifactForA, aContent));
@@ -200,6 +200,107 @@ public class WorkflowEngineTest {
             "A's artifact must still exist on disk after B's rollback: B's checkpoint is separate from A's");
         assertEquals(aContent, Files.readString(artifactForA),
             "A's artifact content must be unchanged, read back directly from disk, not inferred from status");
+    }
+
+    /**
+     * A and B are siblings, both depending only on ROOT, so the engine schedules them in
+     * the same wave and they genuinely execute concurrently, not one after the other.
+     * Both mutate real files under their own declared writePaths while their executions
+     * overlap in wall-clock time (enforced with delays), B then fails and rolls back, and
+     * A's file is verified present and correct afterward by reading it back. This is the
+     * scenario the whole-tree-checkpoint design got wrong: A's checkpoint or restore
+     * touching B's in-flight write, or vice versa, would have been invisible in a
+     * single-node test where nothing runs at the same time as anything else.
+     */
+    public void testTwoParallelNodesWithDisjointWritePathsRollBackIndependently() throws IOException {
+        Path targetServiceDir = Files.createTempDirectory("engine-target-service");
+        Path runsDir = Files.createTempDirectory("engine-runs");
+
+        WorkflowNode root = TestEngineFixtures.node("ROOT", Set.of(), 1);
+        WorkflowNode nodeA = TestEngineFixtures.nodeWithWritePaths("A", Set.of("ROOT"), 1, Set.of("a-dir"));
+        WorkflowNode nodeB = TestEngineFixtures.nodeWithWritePaths("B", Set.of("ROOT"), 1, Set.of("b-dir"));
+        WorkflowGraph graph = WorkflowGraph.of(List.of(root, nodeA, nodeB,
+            TestEngineFixtures.node("JOIN", Set.of("A", "B"), 1)));
+        WorkflowState state = new WorkflowState("RUN-1", TestEngineFixtures.requirementSpec(), graph.getAllNodes());
+
+        Path artifactForA = targetServiceDir.resolve("a-dir/a-artifact.txt");
+        String aContent = "A's real output, written while B is concurrently mutating its own files";
+        ControllableExecutor executor = new ControllableExecutor();
+        executor.alwaysReturn("ROOT", ControllableExecutor.Outcome.success("root", targetServiceDir.resolve("root.txt"), "x"));
+        executor.alwaysReturn("A", ControllableExecutor.Outcome.success("A completes", artifactForA, aContent));
+        executor.alwaysReturn("B", ControllableExecutor.Outcome.failure("B fails and exhausts its budget"));
+        // Force real wall-clock overlap: both A and B sleep before returning, so their
+        // executions are genuinely concurrent, not accidentally serialized by how fast
+        // the JVM happens to schedule two near-instant tasks.
+        executor.withDelay("A", Duration.ofMillis(150));
+        executor.withDelay("B", Duration.ofMillis(150));
+
+        WorkflowEngine engine = new WorkflowEngine(graph, state, registryWith(executor), new Gates(),
+            new PolicyEngine.AllowAllPolicyEngine(), new Checkpoint(), targetServiceDir, runsDir,
+            new CommandRunner(), null, null);
+
+        WorkflowStatus outcome = engine.run();
+
+        List<ControllableExecutor.Invocation> invocations = executor.invocations();
+        ControllableExecutor.Invocation invA = findInvocation(invocations, "A");
+        ControllableExecutor.Invocation invB = findInvocation(invocations, "B");
+        assertTrue(invA.start().isBefore(invB.end()) && invB.start().isBefore(invA.end()),
+            "A and B must have genuinely overlapped in wall-clock time for this test to prove anything: A=["
+                + invA.start() + "," + invA.end() + "] B=[" + invB.start() + "," + invB.end() + "]");
+
+        assertEquals(WorkflowStatus.SAFE_STOPPED, outcome, "B exhausts its budget with no fallback, JOIN never becomes ready");
+        assertEquals(NodeStatus.COMPLETED, state.getStatus("A"), "A must remain COMPLETED: only B rolled back");
+        assertEquals(NodeStatus.ROLLED_BACK, state.getStatus("B"), "B must show ROLLED_BACK");
+
+        assertTrue(Files.exists(artifactForA),
+            "A's artifact must exist after B's concurrent rollback: A and B checkpoint and restore disjoint paths");
+        assertEquals(aContent, Files.readString(artifactForA),
+            "A's artifact content must be exactly what A wrote, read back directly from disk, unaffected by B's"
+                + " concurrent failure and rollback happening in the very same scheduling wave");
+    }
+
+    /**
+     * The non-vacuity proof your review asked for: widen B's writePaths to cover A's
+     * directory too, so the two nodes' write paths now overlap even though they still run
+     * concurrently. B's rollback then legitimately has permission to delete anything
+     * under "a-dir" as far as Checkpoint is concerned, which means A's artifact is no
+     * longer safe. If this test passed, the previous test would be proving nothing:
+     * this confirms the previous test's assertion actually depends on the disjoint
+     * writePaths, not on some other accidental property of the scenario.
+     */
+    public void testWideningBsWritePathsToOverlapAsProvesThePreviousTestIsNotVacuous() throws IOException {
+        Path targetServiceDir = Files.createTempDirectory("engine-target-service");
+        Path runsDir = Files.createTempDirectory("engine-runs");
+
+        WorkflowNode root = TestEngineFixtures.node("ROOT", Set.of(), 1);
+        WorkflowNode nodeA = TestEngineFixtures.nodeWithWritePaths("A", Set.of("ROOT"), 1, Set.of("a-dir"));
+        // B's writePaths now covers "a-dir" too: a workflow authoring error, deliberately
+        // introduced here to prove the previous test's guarantee is real.
+        WorkflowNode nodeB = TestEngineFixtures.nodeWithWritePaths("B", Set.of("ROOT"), 1, Set.of("a-dir", "b-dir"));
+        WorkflowGraph graph = WorkflowGraph.of(List.of(root, nodeA, nodeB,
+            TestEngineFixtures.node("JOIN", Set.of("A", "B"), 1)));
+        WorkflowState state = new WorkflowState("RUN-1", TestEngineFixtures.requirementSpec(), graph.getAllNodes());
+
+        Path artifactForA = targetServiceDir.resolve("a-dir/a-artifact.txt");
+        String aContent = "A's real output, now unsafe because B's writePaths overlaps A's";
+        ControllableExecutor executor = new ControllableExecutor();
+        executor.alwaysReturn("ROOT", ControllableExecutor.Outcome.success("root", targetServiceDir.resolve("root.txt"), "x"));
+        executor.alwaysReturn("A", ControllableExecutor.Outcome.success("A completes", artifactForA, aContent));
+        executor.alwaysReturn("B", ControllableExecutor.Outcome.failure("B fails and exhausts its budget"));
+        executor.withDelay("A", Duration.ofMillis(150));
+        executor.withDelay("B", Duration.ofMillis(200));
+
+        WorkflowEngine engine = new WorkflowEngine(graph, state, registryWith(executor), new Gates(),
+            new PolicyEngine.AllowAllPolicyEngine(), new Checkpoint(), targetServiceDir, runsDir,
+            new CommandRunner(), null, null);
+
+        engine.run();
+
+        assertFalse(Files.exists(artifactForA),
+            "with B's writePaths deliberately widened to overlap A's, B's rollback (which took its checkpoint of"
+                + " \"a-dir\" and \"b-dir\" before A had written anything, since B started concurrently with A) must"
+                + " delete A's artifact when it restores \"a-dir\" back to its pre-checkpoint (empty) state: this is"
+                + " exactly the failure mode disjoint writePaths in the previous test exist to prevent");
     }
 
     public void testThreeParallelNodesAllReachCompletedBeforeTheJoinNodeStartsAndAuditLogProvesIt() throws IOException {

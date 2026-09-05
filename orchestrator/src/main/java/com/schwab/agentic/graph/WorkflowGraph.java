@@ -129,6 +129,11 @@ public final class WorkflowGraph {
         for (Object criterionId : (List<Object>) evidenceForRaw) {
             producesEvidenceFor.add((String) criterionId);
         }
+        Object writePathsRaw = json.getOrDefault("writePaths", List.of());
+        Set<String> writePaths = new LinkedHashSet<>();
+        for (Object path : (List<Object>) writePathsRaw) {
+            writePaths.add((String) path);
+        }
         return new WorkflowNode(
             (String) json.get("id"),
             (String) json.getOrDefault("name", json.get("id")),
@@ -139,7 +144,8 @@ public final class WorkflowGraph {
             RiskLevel.valueOf((String) json.get("riskLevel")),
             ((Double) json.getOrDefault("maxAttempts", 1.0)).intValue(),
             producesEvidenceFor,
-            (String) json.get("fallbackExecutor"));
+            (String) json.get("fallbackExecutor"),
+            writePaths);
     }
 
     /**

@@ -38,11 +38,12 @@
       "name": "Implementation",
       "executor": "implement",
       "dependsOn": ["DESIGN"],
-      "entryGate": "checkpoint-exists",
+      "entryGate": "checkpointing-configured",
       "exitGate": "compiles",
       "riskLevel": "HIGH",
       "maxAttempts": 3,
-      "producesEvidenceFor": ["compiles"]
+      "producesEvidenceFor": ["compiles"],
+      "writePaths": ["src/main"]
     },
     {
       "id": "TEST",
@@ -53,7 +54,8 @@
       "exitGate": "tests-pass",
       "riskLevel": "MEDIUM",
       "maxAttempts": 3,
-      "producesEvidenceFor": ["tests-pass"]
+      "producesEvidenceFor": ["tests-pass"],
+      "writePaths": ["src/test"]
     },
     {
       "id": "DOCUMENT",
@@ -64,7 +66,8 @@
       "exitGate": "artifact-written",
       "riskLevel": "LOW",
       "maxAttempts": 2,
-      "producesEvidenceFor": []
+      "producesEvidenceFor": [],
+      "writePaths": ["docs"]
     },
     {
       "id": "VALIDATE",

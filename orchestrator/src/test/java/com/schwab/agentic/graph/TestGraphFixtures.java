@@ -58,7 +58,7 @@ final class TestGraphFixtures {
             "requirement-unambiguous-or-approved", "artifact-written", RiskLevel.MEDIUM, 2, Set.of());
         WorkflowNode implement = new WorkflowNode(
             "IMPLEMENT", "Implementation", "implement", Set.of("DESIGN"),
-            "checkpoint-exists", "compiles", RiskLevel.HIGH, 3, Set.of("compiles"));
+            "checkpointing-configured", "compiles", RiskLevel.HIGH, 3, Set.of("compiles"));
         WorkflowNode test = new WorkflowNode(
             "TEST", "Test generation", "test", Set.of("DESIGN"),
             "dependencies-complete", "tests-pass", RiskLevel.MEDIUM, 3, Set.of("tests-pass"));

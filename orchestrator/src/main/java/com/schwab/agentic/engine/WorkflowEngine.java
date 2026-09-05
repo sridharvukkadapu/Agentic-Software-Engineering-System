@@ -11,6 +11,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -40,14 +41,35 @@ import java.util.concurrent.Future;
  * A checkpoint is taken per node, not per run: immediately before a node's first attempt
  * (never before a retry of the same node, which would only capture that node's own
  * partial damage rather than the state before it touched anything), the engine snapshots
- * the target service working tree under {@code runs/<runId>/checkpoints/<nodeId>/} and
- * keeps that node's handle for the life of this engine instance. Rolling back a node
- * restores only that node's own checkpoint, never another node's. A single run-level
- * checkpoint was tried first and found to actively contradict spec 06: re-planning must
- * be able to preserve a completed node's output untouched while invalidating and
- * re-running only its downstream nodes, which is impossible if every rollback in the run
- * shares one snapshot, since restoring it would also undo whatever the preserved node had
- * legitimately produced after that snapshot was taken.
+ * only that node's declared {@link WorkflowNode#writePaths}, not the whole target service
+ * working tree, under {@code runs/<runId>/checkpoints/<nodeId>/}, and keeps that node's
+ * handle for the life of this engine instance. Rolling back a node restores only those
+ * same write paths from that node's own checkpoint, never another node's.
+ *
+ * Two designs were tried and found wrong before this one. A single run-level checkpoint
+ * contradicts spec 06: re-planning must preserve a completed node's output untouched
+ * while invalidating and re-running only its downstream nodes, which is impossible if
+ * every rollback in the run shares one snapshot. A per-node checkpoint of the *whole*
+ * working tree is unsafe the moment nodes execute concurrently, which they do here
+ * (IMPLEMENT, TEST and DOCUMENT run in parallel): each node's checkpoint would capture
+ * whatever a sibling had already written by that moment, and each node's restore would
+ * delete whatever a sibling had written since, including work that node had already
+ * completed. Scoping every checkpoint and restore to the node's own declared
+ * {@code writePaths} removes the possibility of that interference rather than working
+ * around it: two nodes with disjoint write paths can checkpoint, mutate and roll back
+ * completely independently, because neither one's {@link Checkpoint} operations ever
+ * look at, or touch, a path outside its own declared set. A workflow that gives two
+ * concurrently-runnable nodes overlapping write paths has an authoring error this class
+ * has no way to detect; it is a workflow-design invariant, not a runtime check.
+ *
+ * Rolling back a node whose status is INVALIDATED (spec 06's re-planning, not this spec)
+ * has no caller anywhere in this class. Re-planning needs to revert a previously-COMPLETED
+ * node's output when an upstream change invalidates it, which is a materially different
+ * scenario from this spec's rollback (a node failing its own exit gate with no retry
+ * budget or fallback left): the checkpoint to restore from is not "immediately before
+ * this node's own last attempt," since the node already completed successfully once, and
+ * deciding which checkpoint (or whether a fresh one) applies to an invalidated node is
+ * spec 06's decision to make, not something this class should guess at now.
  */
 public final class WorkflowEngine {
 
@@ -65,8 +87,23 @@ public final class WorkflowEngine {
     private final String buildCommand;
     private final String testCommand;
 
-    private final Map<String, Checkpoint.Handle> checkpointHandlesByNodeId = new HashMap<>();
-    private boolean safeStopRequested;
+    // ConcurrentHashMap, not HashMap: nodes in the same wave execute on separate virtual
+    // threads (see executeWaveAndWaitForAll), and takeCheckpointForNodeIfConfigured's
+    // computeIfAbsent call is reached concurrently from each of them. A plain HashMap
+    // under concurrent computeIfAbsent calls throws ConcurrentModificationException at
+    // best and silently corrupts its internal structure at worst; this was caught by
+    // testTwoParallelNodesWithDisjointWritePathsRollBackIndependently, which is the
+    // first test in this file to actually have two nodes take a checkpoint at the same
+    // moment rather than one after another.
+    private final Map<String, Checkpoint.Handle> checkpointHandlesByNodeId = new ConcurrentHashMap<>();
+    // volatile: written from the virtual threads executing individual nodes
+    // (executeOneNode, rollBackAndFail), read from the main scheduling thread in run().
+    // The wait-for-all barrier (future.get() before the next read) already provides a
+    // happens-before edge here, so this is defense in depth rather than a fix for an
+    // observed failure, but relying on that barrier implicitly for visibility, with no
+    // marker on the field itself, is exactly the kind of thing worth making explicit
+    // after finding the checkpointHandlesByNodeId concurrency bug in this same class.
+    private volatile boolean safeStopRequested;
 
     public WorkflowEngine(WorkflowGraph graph, WorkflowState state, NodeExecutorRegistry executors,
                            Gates gates, PolicyEngine policyEngine, Checkpoint checkpoint,
@@ -158,18 +195,27 @@ public final class WorkflowEngine {
 
     /**
      * Takes a checkpoint for this node under {@code runs/<runId>/checkpoints/<nodeId>/}
-     * if one has not already been taken for it, capturing the working tree as it stands
-     * immediately before this node's first attempt. Called once per node, not once per
-     * retry: a retry re-executes the same node, so re-checkpointing before a retry would
-     * capture that node's own prior (failed) attempt's damage rather than the clean
-     * state from before the node ever ran, which is what rollback needs to restore to.
+     * if one has not already been taken for it, capturing only {@code node.writePaths()}
+     * as they stand immediately before this node's first attempt. Called once per node,
+     * not once per retry: a retry re-executes the same node, so re-checkpointing before a
+     * retry would capture that node's own prior (failed) attempt's damage rather than the
+     * clean state from before the node ever ran, which is what rollback needs to restore
+     * to.
+     *
+     * A node with no declared write paths is never checkpointed at all: it declares it
+     * writes nothing, so there is nothing to protect, and taking a checkpoint scoped to
+     * an empty path set would be meaningless. This is also what makes concurrent nodes
+     * safe: two nodes whose {@code writePaths} do not overlap checkpoint, and later
+     * restore, entirely disjoint slices of the tree, so one node's snapshot can never
+     * capture a sibling's in-flight writes and one node's rollback can never touch a
+     * sibling's files.
      */
     private void takeCheckpointForNodeIfConfigured(WorkflowNode node) {
-        if (targetServiceDirectory == null || runsDirectory == null) {
+        if (targetServiceDirectory == null || runsDirectory == null || !node.isCheckpointed()) {
             return;
         }
         checkpointHandlesByNodeId.computeIfAbsent(node.id(),
-            nodeId -> checkpoint.take(targetServiceDirectory, runsDirectory, state.getRunId(), nodeId));
+            nodeId -> checkpoint.take(targetServiceDirectory, runsDirectory, state.getRunId(), nodeId, node.writePaths()));
     }
 
     /**

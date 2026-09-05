@@ -427,6 +427,7 @@ public final class WorkflowState {
         json.put("maxAttempts", (double) node.maxAttempts());
         json.put("producesEvidenceFor", new ArrayList<Object>(node.producesEvidenceFor()));
         json.put("fallbackExecutor", node.fallbackExecutor());
+        json.put("writePaths", new ArrayList<Object>(node.writePaths()));
         json.put("status", status.name());
         return json;
     }
@@ -443,6 +444,13 @@ public final class WorkflowState {
         for (Object criterionId : evidenceForRaw) {
             producesEvidenceFor.add((String) criterionId);
         }
+        Set<String> writePaths = new LinkedHashSet<>();
+        Object writePathsRaw = json.get("writePaths");
+        if (writePathsRaw instanceof List<?> writePathsList) {
+            for (Object path : writePathsList) {
+                writePaths.add((String) path);
+            }
+        }
         return new WorkflowNode(
             (String) json.get("id"),
             (String) json.get("name"),
@@ -453,7 +461,8 @@ public final class WorkflowState {
             RiskLevel.valueOf((String) json.get("riskLevel")),
             ((Double) json.get("maxAttempts")).intValue(),
             producesEvidenceFor,
-            (String) json.get("fallbackExecutor"));
+            (String) json.get("fallbackExecutor"),
+            writePaths);
     }
 
     private static Map<String, Object> auditEventToJson(AuditEvent event) {

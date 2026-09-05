@@ -30,4 +30,11 @@ final class TestEngineFixtures {
             id, id, "controllable", dependsOn, "dependencies-complete", "artifact-written",
             RiskLevel.LOW, maxAttempts, Set.of(), fallbackExecutor);
     }
+
+    /** A node with declared write paths, so the engine actually checkpoints it when a target service directory is configured. */
+    static WorkflowNode nodeWithWritePaths(String id, Set<String> dependsOn, int maxAttempts, Set<String> writePaths) {
+        return new WorkflowNode(
+            id, id, "controllable", dependsOn, "dependencies-complete", "artifact-written",
+            RiskLevel.LOW, maxAttempts, Set.of(), null, writePaths);
+    }
 }

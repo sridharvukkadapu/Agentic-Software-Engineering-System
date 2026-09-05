@@ -22,6 +22,11 @@ import java.util.Set;
  * 5 and AC-02-8's structural argument are real rather than merely asserted in a Javadoc
  * comment: a rollback mechanism that could restore corrupted bytes and report success
  * would be worse than no rollback at all, since it would look like it worked.
+ *
+ * Every {@code take}/{@code restore} call here passes an explicit {@code writePaths} set,
+ * since {@link Checkpoint} scopes both operations to exactly those paths: this is what
+ * lets concurrently-executing nodes with disjoint write paths checkpoint and roll back
+ * independently without observing each other's files.
  */
 public class CheckpointTest {
 
@@ -35,19 +40,56 @@ public class CheckpointTest {
         Files.writeString(fileB, "original B content");
 
         Checkpoint checkpoint = new Checkpoint();
-        Checkpoint.Handle handle = checkpoint.take(sourceDir, runsDir, "RUN-1", "N1");
+        Checkpoint.Handle handle = checkpoint.take(sourceDir, runsDir, "RUN-1", "N1", Set.of("A.txt", "nested"));
 
         Files.writeString(fileA, "mutated A content, should be reverted");
         Files.writeString(fileB, "mutated B content, should be reverted");
-        Files.writeString(sourceDir.resolve("new-file-not-in-checkpoint.txt"), "must be deleted by restore");
+        Files.writeString(sourceDir.resolve("nested/new-file-not-in-checkpoint.txt"), "must be deleted by restore");
 
         int restoredCount = checkpoint.restore(handle);
 
         assertEquals(2, restoredCount, "expected exactly the two originally-checkpointed files to be restored");
         assertEquals("original A content", Files.readString(fileA), "A must be restored to its exact prior content");
         assertEquals("original B content", Files.readString(fileB), "B must be restored to its exact prior content");
-        assertFalse(Files.exists(sourceDir.resolve("new-file-not-in-checkpoint.txt")),
-            "a file created after the checkpoint must be removed by restore, since it was not part of the snapshot");
+        assertFalse(Files.exists(sourceDir.resolve("nested/new-file-not-in-checkpoint.txt")),
+            "a file created after the checkpoint, under a checkpointed path, must be removed by restore");
+    }
+
+    /**
+     * The scoping guarantee this whole redesign exists for: a path outside the declared
+     * writePaths is never touched by take() (not copied into the checkpoint) or by
+     * restore() (never deleted or overwritten), even though it sits in the very same
+     * source directory. This is what makes two concurrently-executing nodes with
+     * disjoint writePaths safe to checkpoint and roll back independently.
+     */
+    public void testAPathOutsideWritePathsIsUntouchedByEitherTakeOrRestore() throws IOException {
+        Path sourceDir = Files.createTempDirectory("checkpoint-source");
+        Path runsDir = Files.createTempDirectory("checkpoint-runs");
+        Path ownedFile = sourceDir.resolve("owned/File.java");
+        Path siblingFile = sourceDir.resolve("sibling/Other.java");
+        Files.createDirectories(ownedFile.getParent());
+        Files.createDirectories(siblingFile.getParent());
+        Files.writeString(ownedFile, "owned original content");
+        Files.writeString(siblingFile, "sibling content, must never be touched");
+
+        Checkpoint checkpoint = new Checkpoint();
+        Checkpoint.Handle handle = checkpoint.take(sourceDir, runsDir, "RUN-1", "N1", Set.of("owned"));
+
+        List<String> checkpointedPaths = handle.files().stream().map(Checkpoint.FileRecord::relativePath).toList();
+        assertFalse(checkpointedPaths.stream().anyMatch(path -> path.contains("sibling")),
+            "take() scoped to \"owned\" must never copy anything under \"sibling\": " + checkpointedPaths);
+
+        // Mutate the sibling file after the checkpoint, simulating a concurrent node's
+        // own in-flight write landing at the same moment this node rolls back.
+        Files.writeString(siblingFile, "sibling content changed by a concurrent node after our checkpoint");
+        Files.writeString(ownedFile, "owned content corrupted, needs rollback");
+
+        checkpoint.restore(handle);
+
+        assertEquals("owned original content", Files.readString(ownedFile), "owned file must be restored");
+        assertEquals("sibling content changed by a concurrent node after our checkpoint", Files.readString(siblingFile),
+            "restore() scoped to \"owned\" must never touch \"sibling\", even though a concurrent node changed it"
+                + " after this checkpoint was taken: this is the whole point of scoping checkpoints to writePaths");
     }
 
     /**
@@ -66,7 +108,7 @@ public class CheckpointTest {
         Files.writeString(file, "original content, this is what restore should verify against");
 
         Checkpoint checkpoint = new Checkpoint();
-        Checkpoint.Handle handle = checkpoint.take(sourceDir, runsDir, "RUN-1", "N1");
+        Checkpoint.Handle handle = checkpoint.take(sourceDir, runsDir, "RUN-1", "N1", Set.of("Service.java"));
 
         // Corrupt the checkpoint's own copy on disk, after take() already recorded the
         // correct hash for the original content. This is not mutating the source file;
@@ -101,7 +143,7 @@ public class CheckpointTest {
         Files.writeString(file, "original content");
 
         Checkpoint checkpoint = new Checkpoint();
-        Checkpoint.Handle handle = checkpoint.take(sourceDir, runsDir, "RUN-1", "N1");
+        Checkpoint.Handle handle = checkpoint.take(sourceDir, runsDir, "RUN-1", "N1", Set.of("Service.java"));
         Files.writeString(handle.checkpointDirectory().resolve("Service.java"), "corrupted");
 
         WorkflowNode node = new WorkflowNode("N1", "N1", "noop", Set.of(), null, null,
@@ -141,7 +183,9 @@ public class CheckpointTest {
         Files.writeString(sourceDir.resolve("build/output.jar"), "build output, not source");
 
         Checkpoint checkpoint = new Checkpoint();
-        Checkpoint.Handle handle = checkpoint.take(sourceDir, runsDir, "RUN-1", "N1");
+        // Scope writePaths to the whole tree ("."), the broadest case, so .git/target/build
+        // exclusion is proven even when a node's write path could otherwise reach them.
+        Checkpoint.Handle handle = checkpoint.take(sourceDir, runsDir, "RUN-1", "N1", Set.of("."));
 
         List<String> checkpointedPaths = handle.files().stream().map(Checkpoint.FileRecord::relativePath).toList();
         assertTrue(checkpointedPaths.contains("Service.java"), "the real source file must be checkpointed");
@@ -164,7 +208,7 @@ public class CheckpointTest {
         Files.writeString(sourceDir.resolve("Service.java"), "original content");
 
         Checkpoint checkpoint = new Checkpoint();
-        Checkpoint.Handle handle = checkpoint.take(sourceDir, runsDir, "RUN-1", "N1");
+        Checkpoint.Handle handle = checkpoint.take(sourceDir, runsDir, "RUN-1", "N1", Set.of("Service.java"));
 
         // Simulate a checkpoint file that was deleted from disk after being taken, a
         // different corruption mode than mutated bytes: the file the handle still claims
@@ -174,5 +218,15 @@ public class CheckpointTest {
         assertThrows(java.io.UncheckedIOException.class,
             () -> checkpoint.restore(handle),
             "restore() must throw, not silently skip, when a checkpointed file is missing from disk");
+    }
+
+    public void testTakeRejectsAnEmptyWritePathsSet() throws IOException {
+        Path sourceDir = Files.createTempDirectory("checkpoint-source");
+        Path runsDir = Files.createTempDirectory("checkpoint-runs");
+
+        Checkpoint checkpoint = new Checkpoint();
+        assertThrows(IllegalArgumentException.class,
+            () -> checkpoint.take(sourceDir, runsDir, "RUN-1", "N1", Set.of()),
+            "take() must reject an empty writePaths set rather than silently checkpointing nothing");
     }
 }

@@ -31,7 +31,7 @@ public final class Gates {
     public Gates() {
         register("dependencies-complete", new DependenciesCompleteGate());
         register("requirement-unambiguous-or-approved", new RequirementUnambiguousOrApprovedGate());
-        register("checkpoint-exists", new CheckpointExistsGate());
+        register("checkpointing-configured", new CheckpointingConfiguredGate());
         register("artifact-written", new ArtifactWrittenGate());
         register("compiles", new CompilesGate());
         register("tests-pass", new TestsPassGate());
@@ -101,20 +101,20 @@ public final class Gates {
         }
     }
 
-    /** Blocks any node that mutates the target service unless a checkpoint was taken first. */
     /**
      * Checks that checkpointing is actually configured for this run at all, so a node
      * that mutates the target service cannot run in a configuration where rollback is
-     * structurally impossible. This does not, and cannot, check that this specific
-     * node's own checkpoint already exists: {@link WorkflowEngine} takes a node's
-     * checkpoint automatically immediately before calling its executor, which happens
-     * strictly after this entry gate has already passed, so the node's own checkpoint by
+     * structurally impossible. Named for what it actually checks (configuration), not
+     * "checkpoint-exists": it does not, and cannot, check that this specific node's own
+     * checkpoint already exists. {@link WorkflowEngine} takes a node's checkpoint
+     * automatically immediately before calling its executor, which happens strictly
+     * after this entry gate has already passed, so the node's own checkpoint by
      * construction does not exist yet at the moment this gate runs. Checking for it here
      * would make this gate permanently and vacuously fail on every node's first attempt.
      * What genuinely varies, and is worth gating on, is whether a target service
      * directory and runs directory were wired up for this run in the first place.
      */
-    private static final class CheckpointExistsGate implements Gate {
+    private static final class CheckpointingConfiguredGate implements Gate {
         @Override
         public Result evaluate(WorkflowNode node, WorkflowState state, GateContext context) {
             if (context.targetServiceDirectory() == null || context.runsDirectory() == null) {

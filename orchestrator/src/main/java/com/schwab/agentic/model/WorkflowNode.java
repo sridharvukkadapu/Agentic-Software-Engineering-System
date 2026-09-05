@@ -4,8 +4,8 @@ import java.util.Set;
 
 /**
  * One stage in the workflow graph: an id, its dependencies, the gates that guard entry
- * and exit, its risk profile, an optional fallback executor, and which acceptance
- * criteria it produces evidence for.
+ * and exit, its risk profile, an optional fallback executor, which acceptance criteria
+ * it produces evidence for, and which paths it is permitted to write to.
  *
  * This type is fully immutable and carries no status. Status lives in
  * {@link WorkflowState}, keyed by node id, because a {@code WorkflowNode} instance is not
@@ -31,6 +31,14 @@ import java.util.Set;
  * {@code executor} with the accumulated failure history in context, while fallback runs
  * {@code fallbackExecutor} instead, once, as a deliberately different strategy for
  * getting the node to a completed state.
+ *
+ * {@code writePaths} declares the relative paths (files or directories, relative to the
+ * target service working tree) this node is permitted to modify. A checkpoint taken for
+ * this node covers only these paths, not the whole tree: nodes with disjoint
+ * {@code writePaths} can run concurrently and roll back independently without one
+ * node's snapshot capturing, or one node's restore touching, a sibling's in-flight
+ * writes. A node whose {@code writePaths} is empty is never checkpointed at all, since it
+ * declares it writes nothing there is nothing for a checkpoint to protect.
  */
 public record WorkflowNode(
     String id,
@@ -42,7 +50,8 @@ public record WorkflowNode(
     RiskLevel riskLevel,
     int maxAttempts,
     Set<String> producesEvidenceFor,
-    String fallbackExecutor
+    String fallbackExecutor,
+    Set<String> writePaths
 ) {
     public WorkflowNode {
         if (id == null || id.isBlank()) {
@@ -62,9 +71,27 @@ public record WorkflowNode(
         }
         dependsOn = dependsOn == null ? Set.of() : Set.copyOf(dependsOn);
         producesEvidenceFor = producesEvidenceFor == null ? Set.of() : Set.copyOf(producesEvidenceFor);
+        writePaths = writePaths == null ? Set.of() : Set.copyOf(writePaths);
     }
 
-    /** Convenience constructor for nodes with no declared fallback. */
+    /** Convenience constructor for nodes with a fallback but no declared write paths (not checkpointed). */
+    public WorkflowNode(
+        String id,
+        String name,
+        String executor,
+        Set<String> dependsOn,
+        String entryGate,
+        String exitGate,
+        RiskLevel riskLevel,
+        int maxAttempts,
+        Set<String> producesEvidenceFor,
+        String fallbackExecutor
+    ) {
+        this(id, name, executor, dependsOn, entryGate, exitGate, riskLevel, maxAttempts, producesEvidenceFor,
+            fallbackExecutor, Set.of());
+    }
+
+    /** Convenience constructor for nodes with no declared fallback and no declared write paths. */
     public WorkflowNode(
         String id,
         String name,
@@ -76,10 +103,15 @@ public record WorkflowNode(
         int maxAttempts,
         Set<String> producesEvidenceFor
     ) {
-        this(id, name, executor, dependsOn, entryGate, exitGate, riskLevel, maxAttempts, producesEvidenceFor, null);
+        this(id, name, executor, dependsOn, entryGate, exitGate, riskLevel, maxAttempts, producesEvidenceFor,
+            null, Set.of());
     }
 
     public boolean hasFallback() {
         return fallbackExecutor != null && !fallbackExecutor.isBlank();
+    }
+
+    public boolean isCheckpointed() {
+        return !writePaths.isEmpty();
     }
 }
