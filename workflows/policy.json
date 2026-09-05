@@ -1,0 +1,62 @@
+{
+  "rules": [
+    {
+      "name": "critical-risk-requires-approval",
+      "category": "change-control",
+      "enabled": true,
+      "description": "CRITICAL risk nodes always require human approval before execution."
+    },
+    {
+      "name": "high-risk-requires-approval",
+      "category": "change-control",
+      "enabled": true,
+      "description": "HIGH risk nodes require human approval before execution, unless the run is in --auto-approve mode."
+    },
+    {
+      "name": "change-budget",
+      "category": "change-control",
+      "enabled": true,
+      "description": "Denies a brownfield node's completion when its real diff touches more than maxFilesChanged files or adds more than maxLinesAdded lines.",
+      "maxFilesChanged": 3,
+      "maxLinesAdded": 60
+    },
+    {
+      "name": "protected-paths-global",
+      "category": "security",
+      "enabled": true,
+      "description": "Denies any reported write whose canonically resolved path falls outside target-service/ or runs/, including via ../ traversal or an absolute path elsewhere on disk.",
+      "allowedRoots": ["target-service", "runs"]
+    },
+    {
+      "name": "write-paths-contract",
+      "category": "security",
+      "enabled": true,
+      "description": "Denies any reported write that falls outside the node's own declared writePaths, enforcing the same contract the checkpoint mechanism relies on."
+    },
+    {
+      "name": "no-secrets-in-diff",
+      "category": "security",
+      "enabled": true,
+      "description": "Denies completion when a written file's content matches a credential-shaped pattern (API keys, AWS access keys, private key blocks, bearer tokens).",
+      "patterns": [
+        "sk-ant-api[0-9]{2}-[A-Za-z0-9_-]{20,}",
+        "AKIA[0-9A-Z]{16}",
+        "-----BEGIN [A-Z ]*PRIVATE KEY-----",
+        "(?i)bearer [a-z0-9._-]{20,}"
+      ]
+    },
+    {
+      "name": "no-dependency-additions",
+      "category": "security",
+      "enabled": true,
+      "description": "Requires human approval when a diff modifies a dependency manifest (pom.xml, build.gradle, build.gradle.kts).",
+      "dependencyManifestFilenames": ["pom.xml", "build.gradle", "build.gradle.kts"]
+    },
+    {
+      "name": "evidence-before-release",
+      "category": "compliance",
+      "enabled": true,
+      "description": "Denies the RELEASE node's admission when any acceptance criterion lacks passing evidence."
+    }
+  ]
+}

@@ -86,6 +86,7 @@ public final class WorkflowEngine {
     private final CommandRunner commandRunner;
     private final String buildCommand;
     private final String testCommand;
+    private final boolean autoApprove;
 
     // ConcurrentHashMap, not HashMap: nodes in the same wave execute on separate virtual
     // threads (see executeWaveAndWaitForAll), and takeCheckpointForNodeIfConfigured's
@@ -109,6 +110,24 @@ public final class WorkflowEngine {
                            Gates gates, PolicyEngine policyEngine, Checkpoint checkpoint,
                            Path targetServiceDirectory, Path runsDirectory,
                            CommandRunner commandRunner, String buildCommand, String testCommand) {
+        this(graph, state, executors, gates, policyEngine, checkpoint, targetServiceDirectory, runsDirectory,
+            commandRunner, buildCommand, testCommand, false);
+    }
+
+    /**
+     * {@code autoApprove}, when true, tells the HIGH-risk-requires-approval policy rule
+     * to skip its approval requirement (CRITICAL risk still always requires approval
+     * regardless). Spec 05 restricts {@code --auto-approve} to {@code --replay} runs and
+     * always stamps it into the run report (AC-05-8), so a reviewer can always tell a
+     * demo run from a governed one; this constructor does not itself enforce the
+     * replay-only restriction, since that is a property of how the CLI assembles a run,
+     * not of the engine's own scheduling logic.
+     */
+    public WorkflowEngine(WorkflowGraph graph, WorkflowState state, NodeExecutorRegistry executors,
+                           Gates gates, PolicyEngine policyEngine, Checkpoint checkpoint,
+                           Path targetServiceDirectory, Path runsDirectory,
+                           CommandRunner commandRunner, String buildCommand, String testCommand,
+                           boolean autoApprove) {
         this.graph = graph;
         this.state = state;
         this.executors = executors;
@@ -120,6 +139,7 @@ public final class WorkflowEngine {
         this.commandRunner = commandRunner;
         this.buildCommand = buildCommand;
         this.testCommand = testCommand;
+        this.autoApprove = autoApprove;
         validateEveryGateAndExecutorIsResolvable();
     }
 
@@ -237,12 +257,18 @@ public final class WorkflowEngine {
                 }
             }
 
-            PolicyEngine.Decision decision = policyEngine.evaluate(node, state);
-            switch (decision) {
-                case DENY -> state.transition(node.id(), NodeStatus.DENIED, "policy",
-                    "policy denied node " + node.id() + " before execution");
+            PolicyContext policyContext = new PolicyContext(targetServiceDirectory, runsDirectory,
+                state.getRunId(), autoApprove);
+            PolicyRule.Result result = policyEngine.evaluatePreExecutionWithReason(node, state, policyContext);
+            switch (result.decision()) {
+                case DENY -> {
+                    state.record(AuditEvent.EventType.POLICY_DENIED, node.id(), "policy", result.reason(),
+                        Map.of("rule", result.ruleName()));
+                    state.transition(node.id(), NodeStatus.DENIED, "policy",
+                        "policy denied node " + node.id() + " before execution: " + result.reason());
+                }
                 case REQUIRE_APPROVAL -> state.transition(node.id(), NodeStatus.WAITING_APPROVAL, "policy",
-                    "policy requires approval for node " + node.id() + " before execution");
+                    result.reason());
                 case ALLOW -> admitted.add(node);
             }
         }
@@ -333,6 +359,11 @@ public final class WorkflowEngine {
         state.transition(node.id(), NodeStatus.RUNNING, "engine", "attempt starting for " + node.id());
 
         NodeExecutor.ExecutionOutput output = executors.get(node.executor()).execute(node, context);
+
+        if (applyPostExecutionPolicyIfViolated(node, output.outputs())) {
+            return;
+        }
+
         Gate.Result exitResult = evaluateExitGate(node, output.outputs());
 
         if (exitResult.passed()) {
@@ -367,6 +398,54 @@ public final class WorkflowEngine {
         } else {
             rollBackAndFail(node, exitResult.reason());
         }
+    }
+
+    /**
+     * Checks the node's real, reported output against every post-execution policy rule,
+     * since several real rules (protected paths, secrets in a diff, dependency
+     * additions, a change budget) cannot be evaluated until the executor has actually
+     * written something. Returns true if this node's outcome was fully decided here (the
+     * caller must not go on to evaluate the exit gate), false if the node cleared policy
+     * and the caller should proceed normally.
+     *
+     * A DENY is treated exactly like an exit gate failing with no retry budget or
+     * fallback left: real rollback via this node's own checkpoint, then a safe stop,
+     * never a silent pass and never a retry (retrying would just let the same violation
+     * happen again). A REQUIRE_APPROVAL routes the node RUNNING to FAILED to PENDING to
+     * WAITING_APPROVAL in this one tick, using only legal transitions the table already
+     * allows, so the node is held before the scheduler's next pass could otherwise pick
+     * it back up and re-run it. The real diff that triggered the approval requirement is
+     * left on disk exactly as the executor wrote it (nothing here rolls it back); on
+     * approval, the node returns to PENDING and the engine re-runs its executor from
+     * scratch, which means an approved run is not guaranteed to reproduce byte-for-byte
+     * the same diff a human reviewed, since this project has no artifact-freezing
+     * mechanism. That is a real, acknowledged limitation, not something hidden by this
+     * comment.
+     */
+    private boolean applyPostExecutionPolicyIfViolated(WorkflowNode node, Map<String, Object> executorOutputs) {
+        PolicyContext policyContext = new PolicyContext(targetServiceDirectory, runsDirectory, state.getRunId(), autoApprove);
+        PolicyRule.Result result = policyEngine.evaluatePostExecution(node, state, executorOutputs, policyContext);
+
+        if (result.decision() == PolicyEngine.Decision.DENY) {
+            state.record(AuditEvent.EventType.POLICY_DENIED, node.id(), "policy", result.reason(),
+                Map.of("rule", result.ruleName()));
+            state.transition(node.id(), NodeStatus.FAILED, "policy",
+                "post-execution policy denied node " + node.id() + ": " + result.reason());
+            rollBackAndFail(node, result.reason());
+            return true;
+        }
+
+        if (result.decision() == PolicyEngine.Decision.REQUIRE_APPROVAL) {
+            state.transition(node.id(), NodeStatus.FAILED, "policy",
+                "post-execution policy requires approval for node " + node.id()
+                    + " (rule " + result.ruleName() + "): " + result.reason());
+            state.transition(node.id(), NodeStatus.PENDING, "policy",
+                "parking node " + node.id() + " for approval after post-execution policy check");
+            state.transition(node.id(), NodeStatus.WAITING_APPROVAL, "policy", result.reason());
+            return true;
+        }
+
+        return false;
     }
 
     /**
