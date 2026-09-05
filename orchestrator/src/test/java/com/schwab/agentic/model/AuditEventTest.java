@@ -1,22 +1,41 @@
 package com.schwab.agentic.model;
 
+import static com.schwab.agentic.Assertions.assertFalse;
 import static com.schwab.agentic.Assertions.assertThrows;
 import static com.schwab.agentic.Assertions.assertTrue;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
 /**
- * Covers {@link AuditEvent}'s own validation: a STATUS_CHANGE event missing from/to, or
- * a non-STATUS_CHANGE event illegitimately carrying them, must be rejected. The
- * construction-visibility guarantees themselves (private constructor, package-private
- * factory) are covered in {@link WorkflowStateTest}, alongside the rest of the
- * WorkflowState-centric structural checks.
+ * Covers {@link AuditEvent}'s construction and validation: the canonical constructor is
+ * private and the {@link AuditEvent#create} factory is package-private (so only
+ * {@link WorkflowState}, in this same package, can ever build one, per CLAUDE.md rule 1),
+ * and a STATUS_CHANGE event missing from/to, or a non-STATUS_CHANGE event illegitimately
+ * carrying them, is rejected.
  */
 public class AuditEventTest {
+
+    public void testCanonicalConstructorIsPrivate() throws Exception {
+        Constructor<AuditEvent> constructor = canonicalConstructor();
+        assertTrue(Modifier.isPrivate(constructor.getModifiers()),
+            "AuditEvent's constructor must be private, only its package-private create() factory may call it");
+    }
+
+    public void testCreateFactoryIsPackagePrivateNotPublic() throws Exception {
+        Method create = AuditEvent.class.getDeclaredMethod("create",
+            long.class, String.class, String.class, AuditEvent.EventType.class,
+            NodeStatus.class, NodeStatus.class, String.class, String.class, Map.class, Instant.class);
+        int modifiers = create.getModifiers();
+        assertFalse(Modifier.isPublic(modifiers), "AuditEvent.create must not be public");
+        assertFalse(Modifier.isProtected(modifiers), "AuditEvent.create must not be protected");
+        assertFalse(Modifier.isPrivate(modifiers), "AuditEvent.create must be package-private, not private");
+    }
 
     public void testStatusChangeEventRequiresFromAndTo() {
         assertThrows(IllegalArgumentException.class,

@@ -426,6 +426,7 @@ public final class WorkflowState {
         json.put("riskLevel", node.riskLevel().name());
         json.put("maxAttempts", (double) node.maxAttempts());
         json.put("producesEvidenceFor", new ArrayList<Object>(node.producesEvidenceFor()));
+        json.put("fallbackExecutor", node.fallbackExecutor());
         json.put("status", status.name());
         return json;
     }
@@ -451,7 +452,8 @@ public final class WorkflowState {
             (String) json.get("exitGate"),
             RiskLevel.valueOf((String) json.get("riskLevel")),
             ((Double) json.get("maxAttempts")).intValue(),
-            producesEvidenceFor);
+            producesEvidenceFor,
+            (String) json.get("fallbackExecutor"));
     }
 
     private static Map<String, Object> auditEventToJson(AuditEvent event) {

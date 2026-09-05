@@ -4,7 +4,8 @@ import java.util.Set;
 
 /**
  * One stage in the workflow graph: an id, its dependencies, the gates that guard entry
- * and exit, its risk profile, and which acceptance criteria it produces evidence for.
+ * and exit, its risk profile, an optional fallback executor, and which acceptance
+ * criteria it produces evidence for.
  *
  * This type is fully immutable and carries no status. Status lives in
  * {@link WorkflowState}, keyed by node id, because a {@code WorkflowNode} instance is not
@@ -23,6 +24,13 @@ import java.util.Set;
  * to an actual gate implementation is the execution engine's job (spec 02), not this
  * package's, so this class never needs to know what "compiles" or "human-approval"
  * actually check.
+ *
+ * {@code fallbackExecutor}, when non-null, names a second executor the engine runs when
+ * this node exhausts its retry budget (spec 02). A fallback is a materially different
+ * code path from a retry, not another attempt at the same thing: retry re-runs
+ * {@code executor} with the accumulated failure history in context, while fallback runs
+ * {@code fallbackExecutor} instead, once, as a deliberately different strategy for
+ * getting the node to a completed state.
  */
 public record WorkflowNode(
     String id,
@@ -33,7 +41,8 @@ public record WorkflowNode(
     String exitGate,
     RiskLevel riskLevel,
     int maxAttempts,
-    Set<String> producesEvidenceFor
+    Set<String> producesEvidenceFor,
+    String fallbackExecutor
 ) {
     public WorkflowNode {
         if (id == null || id.isBlank()) {
@@ -53,5 +62,24 @@ public record WorkflowNode(
         }
         dependsOn = dependsOn == null ? Set.of() : Set.copyOf(dependsOn);
         producesEvidenceFor = producesEvidenceFor == null ? Set.of() : Set.copyOf(producesEvidenceFor);
+    }
+
+    /** Convenience constructor for nodes with no declared fallback. */
+    public WorkflowNode(
+        String id,
+        String name,
+        String executor,
+        Set<String> dependsOn,
+        String entryGate,
+        String exitGate,
+        RiskLevel riskLevel,
+        int maxAttempts,
+        Set<String> producesEvidenceFor
+    ) {
+        this(id, name, executor, dependsOn, entryGate, exitGate, riskLevel, maxAttempts, producesEvidenceFor, null);
+    }
+
+    public boolean hasFallback() {
+        return fallbackExecutor != null && !fallbackExecutor.isBlank();
     }
 }

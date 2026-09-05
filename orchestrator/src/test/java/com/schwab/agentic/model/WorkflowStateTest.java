@@ -2,14 +2,10 @@ package com.schwab.agentic.model;
 
 import static com.schwab.agentic.Assertions.assertDoesNotThrow;
 import static com.schwab.agentic.Assertions.assertEquals;
-import static com.schwab.agentic.Assertions.assertFalse;
 import static com.schwab.agentic.Assertions.assertNull;
 import static com.schwab.agentic.Assertions.assertThrows;
 import static com.schwab.agentic.Assertions.assertTrue;
 
-import java.lang.reflect.Constructor;
-import java.lang.reflect.Method;
-import java.lang.reflect.Modifier;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -20,36 +16,13 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 /**
- * Covers spec 01's acceptance criteria for {@link WorkflowState}: setStatus visibility
- * (AC-01-7), audit event correctness on every transition (AC-01-8), and JSON round trip
- * fidelity (AC-01-9), plus the thread safety contract the class documents.
+ * Covers spec 01's acceptance criteria for {@link WorkflowState}: audit event
+ * correctness on every transition (AC-01-8) and JSON round trip fidelity (AC-01-9),
+ * plus the thread safety contract the class documents. Construction-visibility checks
+ * for {@link AuditEvent} and immutability checks for {@link WorkflowNode} live in their
+ * own {@link AuditEventTest} and {@link WorkflowNodeTest} respectively, not here.
  */
 public class WorkflowStateTest {
-
-    public void testWorkflowNodeCarriesNoMutableStatusField() {
-        for (Method method : WorkflowNode.class.getDeclaredMethods()) {
-            assertFalse(method.getName().equals("setStatus"),
-                "WorkflowNode must not carry a status setter; status lives in WorkflowState, keyed by id");
-        }
-    }
-
-    public void testAuditEventCanonicalConstructorIsPrivate() throws Exception {
-        Constructor<AuditEvent> constructor = AuditEvent.class.getDeclaredConstructor(
-            long.class, String.class, String.class, AuditEvent.EventType.class,
-            NodeStatus.class, NodeStatus.class, String.class, String.class, Map.class, java.time.Instant.class);
-        assertTrue(Modifier.isPrivate(constructor.getModifiers()),
-            "AuditEvent's constructor must be private, only its package-private create() factory may call it");
-    }
-
-    public void testAuditEventCreateFactoryIsPackagePrivateNotPublic() throws Exception {
-        Method create = AuditEvent.class.getDeclaredMethod("create",
-            long.class, String.class, String.class, AuditEvent.EventType.class,
-            NodeStatus.class, NodeStatus.class, String.class, String.class, Map.class, java.time.Instant.class);
-        int modifiers = create.getModifiers();
-        assertFalse(Modifier.isPublic(modifiers), "AuditEvent.create must not be public");
-        assertFalse(Modifier.isProtected(modifiers), "AuditEvent.create must not be protected");
-        assertFalse(Modifier.isPrivate(modifiers), "AuditEvent.create must be package-private, not private");
-    }
 
     public void testTransitionProducesExactlyOneAuditEventMatchingActualStatuses() {
         WorkflowState state = new WorkflowState("RUN-1", TestFixtures.requirementSpec(),

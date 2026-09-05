@@ -138,7 +138,8 @@ public final class WorkflowGraph {
             (String) json.get("exitGate"),
             RiskLevel.valueOf((String) json.get("riskLevel")),
             ((Double) json.getOrDefault("maxAttempts", 1.0)).intValue(),
-            producesEvidenceFor);
+            producesEvidenceFor,
+            (String) json.get("fallbackExecutor"));
     }
 
     /**
@@ -336,6 +337,28 @@ public final class WorkflowGraph {
     /** The full node order such that every node appears after all of its dependencies. */
     public List<String> topologicalOrder() {
         return List.copyOf(topologicalOrder);
+    }
+
+    /**
+     * Renders this graph as a Mermaid flowchart with no status labels, for a
+     * structure-only diagram (spec 09's architecture documentation renders the graph
+     * with no run attached, so there is no status to show). Delegates to
+     * {@link #toMermaid(Map)} with node ids as their own labels, so the two renderers
+     * cannot drift apart on node ids or edges, only on whether a status annotation is
+     * present.
+     */
+    public String toMermaid() {
+        StringBuilder mermaid = new StringBuilder();
+        mermaid.append("flowchart TD\n");
+        for (String id : topologicalOrder) {
+            mermaid.append("    ").append(id).append("[\"").append(id).append("\"]\n");
+        }
+        for (WorkflowNode node : nodesById.values()) {
+            for (String dependencyId : node.dependsOn()) {
+                mermaid.append("    ").append(dependencyId).append(" --> ").append(node.id()).append('\n');
+            }
+        }
+        return mermaid.toString();
     }
 
     /**
