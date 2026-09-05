@@ -6,7 +6,7 @@
       "executor": "requirement",
       "dependsOn": [],
       "entryGate": "dependencies-complete",
-      "exitGate": "artifact-written",
+      "exitGate": "requirement-complete",
       "riskLevel": "LOW",
       "maxAttempts": 2,
       "producesEvidenceFor": []

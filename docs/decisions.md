@@ -138,3 +138,100 @@ gets closed by a specific later spec, named here so it does not have to be redis
   vacuously by deliberately replacing the check with "assume every declared criterion
   was found" and confirming `testACriterionWithNoMatchingTestMethodProducesNoEvidenceAndReportsFailure`
   then fails, before restoring the real check.
+
+- **Live fixtures were re-recorded for real once the Anthropic account had credit.**
+  Every fixture under `fixtures/` was replaced with a real recording made by
+  `com.schwab.agentic.tools.FixtureRecorder`, a standalone one-time tool (not a unit
+  test: it makes real, paid API calls and produces non-deterministic output, so it is
+  deliberately not wired into `./scripts/test.sh`) using the exact same
+  `AgentClientFactory.createLive` composition the real orchestrator uses in `--live`
+  mode. `FakeAgentClient` no longer appears anywhere a fixture is produced; it remains
+  only in unit tests that exercise an executor's own logic in isolation.
+
+  Real model output failed real gates in ways the placeholder fixtures, written by hand,
+  never could:
+  - The real greenfield and ambiguous requirement text genuinely leaves several things
+    unanswered (cache TTL, timeout duration, eviction policy, and others for
+    greenfield); a real model correctly found these as `openQuestions`, and
+    `requirement-complete` correctly fails, safe-stopping the run. This is the mechanism
+    working as designed, not a fixture to fix, so it is kept and asserted directly by
+    `GreenfieldEndToEndTest.testRealGreenfieldRequirementFixtureReplaysTheRealSafeStop`.
+    `workflows/sdlc-default.json`'s REQUIREMENT node was also found, during this pass, to
+    still declare `artifact-written` as its exit gate instead of `requirement-complete`,
+    meaning the real workflow graph could never actually reach this safe-stop path even
+    though the gate and its tests existed; fixed by wiring the correct gate into the
+    workflow file.
+  - The real design spec for a Spring Boot URL shortener naturally led the model toward
+    Spring/Jackson/SLF4J-flavored implementation code on its first attempt, which failed
+    to compile in the plain `throwaway-compile-project` fixture (a bare `java` plugin
+    project with no Spring dependencies, chosen for fast, hermetic ImplementExecutor
+    testing). The retry, given the real compiler output, produced simpler self-contained
+    code that did compile, exercising AC-04-4 for real. `TestExecutor`'s test-writing
+    attempts for the same scenario were less lucky: both the first attempt and its retry
+    produced Spring/Jackson-referencing test code that also cannot compile in the plain
+    project. This is recorded and asserted as a genuine, known environment-fidelity gap
+    (`GreenfieldEndToEndTest.testRealTestFixtureReplaysTheRealRecordedFailure`), not
+    patched by adding Spring dependencies to the throwaway project or by coaching the
+    prompt away from a design choice that is otherwise reasonable for this codebase.
+  - The first live recording pass also surfaced a design bug in the recorder itself, not
+    in any executor: `FixtureRecorder`'s original `recordTest`/`recordImplement`/
+    `recordDocument` each fed a stage a short, hand-written, disconnected description of
+    an earlier stage's output instead of that stage's real recorded text. This produced
+    a `TestExecutor` fixture where the model invented its own repository-backed
+    `PreviewService` shape that disagreed with what `ImplementExecutor`'s model had
+    actually written, for a reason that had nothing to do with either executor: neither
+    was shown the other's real output. Fixed by threading every stage's real, actual
+    output into the next stage's context (`recordDesign` returns the real
+    `design-spec.json` text, `recordImplement` returns the real diff and reuses its own
+    write-target directory as the compile project `recordTest` writes into), turning the
+    recorder into a genuine sequential pipeline instead of eight independent calls with
+    invented connective tissue.
+  - `TestExecutor.buildUserPrompt` embedded `context.get("acceptanceCriteria")` via
+    `Object.toString()`. For a caller building that value with `Map.of(...)` (the
+    ordinary way to construct an immutable map, and what both `FixtureRecorder` and its
+    tests did), `Map.of()`'s iteration order is not stable across JVM invocations: it
+    depends on the JVM's per-run hash seed. The exact same logical criteria could
+    therefore serialize to a different literal prompt, and hash to a different fixture,
+    from one process run to the next, which is a real reproducibility defect in
+    `--replay` mode, not just a test-harness inconvenience: a genuinely unchanged run
+    could non-deterministically fail to find its own fixture depending on nothing more
+    than JVM startup noise. Fixed by normalizing each criterion's keys into a fixed order
+    before serializing with `Json.write`, independent of whatever map or list
+    implementation the caller happened to pass. The `greenfield/test` fixture was
+    re-recorded once (real cost: two calls, first attempt and retry) using
+    `FixtureRecorder --only-test`, a mode added so re-recording one affected stage does
+    not require re-spending on every other already-correct stage; the other nine
+    fixtures were untouched by this fix and were not re-recorded.
+  - A real retry's prompt embeds the real compiler output of the previous attempt, and a
+    real compiler error names the real, unique temp directory path the attempt ran in.
+    That makes a retry request fundamentally non-reproducible byte-for-byte in a new
+    process (a fresh temp directory gets a fresh path every time), so a retry fixture can
+    never be found again through `ReplayClient`'s normal hash lookup once the original
+    recording process has exited. This is not a bug to fix: the compiler output is real
+    and correct, and the path really did differ. Where a test needs the real, already-
+    compiling result of a recorded retry (not a byte-exact replay of the retry call
+    itself), it reads the retry fixture's stored response text directly and serves it
+    through a fixed-response `AgentClient`, rather than trying to reconstruct a
+    byte-identical retry request.
+
+  Per-fixture outcome of the final live recording (10 fixtures: 3 requirement scenarios,
+  2 impact scenarios, and design/implement/test/document for the greenfield pipeline):
+
+  | Fixture | Recorded live | First attempt passed its gate |
+  |---|---|---|
+  | greenfield/requirement | yes | no (real open questions; correct safe-stop, no retry helps) |
+  | ambiguous/requirement | yes | no (real open questions; correct safe-stop, no retry helps) |
+  | brownfield/requirement | yes | no first attempt, yes on retry |
+  | greenfield/impact | yes | yes |
+  | brownfield/impact | yes | yes |
+  | greenfield/design | yes | yes |
+  | greenfield/implement | yes | no first attempt (Spring-flavored code), yes on retry |
+  | greenfield/test | yes | no first attempt, no on retry (environment-fidelity gap, see above) |
+  | greenfield/document | yes | yes |
+
+  Verified zero fixtures still trace back to `FakeAgentClient`: every file under
+  `fixtures/` was deleted before this recording pass (`FixtureRecorder.deleteExistingFixtures`),
+  and `grep -rl FakeAgentClient fixtures/` (and a content grep for the literal strings
+  `FakeAgentClient` and `unused-fake-fixture-key`, the sentinel value the old
+  `FakeAgentClient.alwaysReturningText` factory stamped into every placeholder response)
+  both return nothing.

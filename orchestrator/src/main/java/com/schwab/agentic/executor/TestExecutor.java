@@ -278,6 +278,44 @@ public final class TestExecutor implements NodeExecutor {
         return writes;
     }
 
+    /**
+     * Rebuilds each criterion entry with its keys in a fixed order and copies the list
+     * into a plain {@link ArrayList}, regardless of what map or list implementation the
+     * caller passed in context. {@code Map.of(...)}'s iteration order (what a caller
+     * building context with the ordinary immutable-map factory would naturally reach
+     * for) is not stable across JVM invocations, since it depends on the JVM's per-run
+     * hash seed: the exact same logical criteria would otherwise serialize to a
+     * different literal string, and therefore hash to a different fixture, from one
+     * process run to the next, breaking {@code --replay}'s byte-identical guarantee for
+     * a run that made no real logical change. Sorting into a fixed key order here makes
+     * the prompt, and therefore the fixture hash, depend only on the actual criteria
+     * data, never on map implementation or JVM hash-seed noise.
+     */
+    private List<Object> normalizedAcceptanceCriteria(Object acceptanceCriteria) {
+        List<Object> normalized = new ArrayList<>();
+        if (!(acceptanceCriteria instanceof List<?> list)) {
+            return normalized;
+        }
+        for (Object item : list) {
+            if (item instanceof Map<?, ?> map) {
+                Map<String, Object> ordered = new LinkedHashMap<>();
+                if (map.containsKey("id")) {
+                    ordered.put("id", map.get("id"));
+                }
+                if (map.containsKey("description")) {
+                    ordered.put("description", map.get("description"));
+                }
+                for (Map.Entry<?, ?> entry : map.entrySet()) {
+                    ordered.putIfAbsent(String.valueOf(entry.getKey()), entry.getValue());
+                }
+                normalized.add(ordered);
+            } else {
+                normalized.add(item);
+            }
+        }
+        return normalized;
+    }
+
     private String buildUserPrompt(Map<String, Object> context) {
         StringBuilder prompt = new StringBuilder();
         prompt.append("Write JUnit tests proving the acceptance criteria below against the design spec.\n\n");
@@ -285,7 +323,9 @@ public final class TestExecutor implements NodeExecutor {
             prompt.append("Design spec:\n").append(context.get("designSpec")).append("\n\n");
         }
         if (context.containsKey("acceptanceCriteria")) {
-            prompt.append("Acceptance criteria:\n").append(context.get("acceptanceCriteria")).append("\n\n");
+            prompt.append("Acceptance criteria:\n")
+                .append(com.schwab.agentic.json.Json.write(normalizedAcceptanceCriteria(context.get("acceptanceCriteria"))))
+                .append("\n\n");
         }
         if (context.containsKey("previousFailureReason")) {
             prompt.append("A previous attempt's tests failed with this output:\n")
