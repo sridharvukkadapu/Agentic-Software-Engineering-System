@@ -1,0 +1,26 @@
+{
+  "nodes": [
+    {
+      "id": "REQUIREMENT",
+      "name": "Requirement analysis",
+      "executor": "requirement",
+      "dependsOn": [],
+      "entryGate": "dependencies-complete",
+      "exitGate": "artifact-written",
+      "riskLevel": "LOW",
+      "maxAttempts": 2,
+      "producesEvidenceFor": []
+    },
+    {
+      "id": "DOCUMENT",
+      "name": "Documentation",
+      "executor": "document",
+      "dependsOn": ["REQUIREMENT"],
+      "entryGate": "dependencies-complete",
+      "exitGate": "artifact-written",
+      "riskLevel": "HIGH",
+      "maxAttempts": 2,
+      "producesEvidenceFor": []
+    }
+  ]
+}

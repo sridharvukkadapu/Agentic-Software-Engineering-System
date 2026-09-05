@@ -153,6 +153,33 @@ public final class WorkflowEngine {
         validateEveryGateAndExecutorIsResolvable();
     }
 
+    private final Map<String, java.util.function.Supplier<Map<String, Object>>> initialContextByNodeId =
+        new ConcurrentHashMap<>();
+
+    /**
+     * Seeds a lazily-supplied context into {@code nodeId}'s very first attempt, merged
+     * underneath whatever the engine itself adds (a retry's {@code previousFailureReason},
+     * for instance, always overrides an initial-context entry of the same key on a later
+     * attempt, since the engine's own signal about what actually happened must never be
+     * shadowed by a caller-supplied default). {@code contextSupplier} is called exactly
+     * once, at the moment this node's first attempt actually starts, never at the time
+     * this method is called: this is what lets a caller (a CLI assembling a whole run in
+     * one blocking call to {@link #run}) supply a downstream node's real input derived
+     * from an upstream node's real output (DOCUMENT reading REQUIREMENT's real
+     * requirement-spec.json, for instance) without needing {@link #run} to pause between
+     * waves for the caller to compute it.
+     */
+    public WorkflowEngine withInitialContext(String nodeId, java.util.function.Supplier<Map<String, Object>> contextSupplier) {
+        initialContextByNodeId.put(nodeId, contextSupplier);
+        return this;
+    }
+
+    /** Convenience overload for a context that is already fully known, needing no lazy computation. */
+    public WorkflowEngine withInitialContext(String nodeId, Map<String, Object> context) {
+        Map<String, Object> snapshot = Map.copyOf(context);
+        return withInitialContext(nodeId, () -> snapshot);
+    }
+
     /**
      * Every entry gate, exit gate and executor name declared anywhere in the graph must
      * resolve before scheduling starts. An unknown gate or executor name is a load-time
@@ -411,6 +438,10 @@ public final class WorkflowEngine {
     private void executeOneNode(WorkflowNode node) {
         takeCheckpointForNodeIfConfigured(node);
         Map<String, Object> context = new HashMap<>();
+        java.util.function.Supplier<Map<String, Object>> initialContextSupplier = initialContextByNodeId.get(node.id());
+        if (initialContextSupplier != null) {
+            context.putAll(initialContextSupplier.get());
+        }
         try {
             runAttemptsUntilOutcome(node, context);
         } catch (RuntimeException e) {

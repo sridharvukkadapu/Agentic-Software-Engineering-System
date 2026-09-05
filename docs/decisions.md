@@ -89,21 +89,124 @@ trade-off. It costs a few extra minutes per mechanism to run the "does this test
 break the thing it claims to test" experiment. Skipping that check is what let the weak
 version of this test through in the first place.
 
+## D4. Policy splits into pre-execution and post-execution, not one evaluation point
+
+**Problem.** The spec 02 `PolicyEngine` interface had one method,
+`evaluate(node, state)`, called once before a node's executor runs. Several of spec 05's
+eight rules (protected paths, secrets in a diff, dependency additions, a change budget)
+cannot be evaluated there: they need to inspect what the executor actually wrote, which
+does not exist until after it runs. But D1 requires a DENY to land before an executor's
+damage happens wherever that is possible.
+
+**Decision.** Split policy evaluation into two points. `evaluate`/
+`evaluatePreExecutionWithReason` stays exactly where spec 02 put it (admission, before the
+executor is ever called) for rules that only need the node's declaration and the run's
+accumulated state (risk level, evidence, requirement revision). A new
+`evaluatePostExecution` runs after the executor returns but before the exit gate decides
+COMPLETED, for rules that need the real reported output. A post-execution DENY is treated
+exactly like an exit gate failing with no retry budget left: real rollback via the
+checkpoint already taken for this node. A post-execution REQUIRE_APPROVAL (only
+`no-dependency-additions` needs this) routes the node RUNNING to FAILED to PENDING to
+WAITING_APPROVAL in one tick, using only edges the transition table already allows, so
+approval-and-resume needed no new legal transition.
+
+**Trade-off.** On approval after a post-execution REQUIRE_APPROVAL, the node returns to
+PENDING and the engine re-runs its executor from scratch on the next pass. The diff a
+human actually reviewed (left on disk, not rolled back) is not guaranteed to be
+byte-identical to what the re-run produces, since this project has no artifact-freezing
+mechanism. Documented plainly in `WorkflowEngine.applyPostExecutionPolicyIfViolated`'s
+own comment rather than hidden: a real gap, not a design this session considers finished.
+
+## D5. `protected-paths` splits into two rules, evaluated in a fixed order
+
+**Problem.** The spec doc's own `protected-paths` rule (DENY any write outside
+`target-service/` and `runs/`, catching `../` traversal) and a later correction
+("protected-path enforcement reads the same writePaths declaration the checkpoints
+use... a node that writes outside its declared paths is a policy violation") describe two
+different things: one is a global security boundary, the other enforces the per-node
+checkpoint contract. Treating them as one rule would blur a workspace escape (a real
+security incident) with a node merely writing somewhere its own declaration did not
+predict (a contract violation, potentially benign).
+
+**Decision.** Two rules: `protected-paths-global` (every reported write, canonically
+resolved, must fall under `target-service/` or `runs/`) evaluated first, then
+`write-paths-contract` (every reported write must fall under the node's own declared
+`writePaths`) evaluated second. A path that escapes the workspace is always reported as
+the security violation it is, never merely as "outside this node's declared paths."
+Neither rule diffs the filesystem: both check the *paths an executor reports having
+written* (`filesWritten`, resolved and normalized), sidestepping the concurrency hazard a
+real pre/post filesystem diff would reintroduce (a sibling node's legitimate concurrent
+write to its own `writePaths` would otherwise look like this node writing outside its own).
+
+**Trade-off.** `audit-completeness`, the spec doc's eighth rule, was dropped to keep the
+total at eight after this split, rather than shipping a ninth rule. Every status
+transition already goes through `WorkflowState.transition`, which always appends exactly
+one audit event by construction; a node cannot reach a terminal status through any other
+path in this codebase. `audit-completeness`'s DENY branch would therefore be unreachable
+without deliberately corrupting `WorkflowState`'s internal state to fabricate a gap, which
+would make its required "prove it can fire" test artificial rather than a real reachable
+threshold, exactly what CLAUDE.md rule 6 argues against.
+
+## D6. Cross-process resume needs a real CLI, scoped to what spec 05 actually tests
+
+**Problem.** "Resume must work across a process boundary" cannot be tested by calling
+`WorkflowState.fromJsonString(state.toJsonString())` inside one test method; that proves
+JSON round-trip fidelity, not that a genuinely separate JVM process can pick a paused run
+back up. Building that meant a real CLI entry point (`Main.java`) capable of starting,
+resuming, and approving a run for real. The full spec doc's CLI describes running the
+complete eight-node `sdlc-default.json` workflow, but that needs each stage's real output
+threaded into the next stage's context (a real design spec into `ImplementExecutor`, a
+real diff into `DocumentExecutor`), which today only happens by hand in
+`FixtureRecorder`, not inside `WorkflowEngine` itself.
+
+**Decision.** Built `Main.java` for real, with `run`, `resume`, and `approve` genuinely
+wired to the real executor registry, real `AgentClientFactory`, and a real
+`WorkflowEngine` (`amend` and `report` are declared but print "not yet implemented,"
+since building either out is spec 06's and spec 08's job respectively). Rather than
+wiring the full eight-node pipeline's cross-node context-threading (a materially larger
+piece of work spec 05 does not ask for), the CLI's own demo workflow
+(`workflows/approval-demo.json`) uses two real spec-04 executors, `RequirementExecutor`
+(LOW risk) and `DocumentExecutor` (declared HIGH risk in this demo workflow specifically,
+an honest workflow-authoring choice, not a fabricated property of the executor itself),
+proving the real thing spec 05 is about: persistence and resume across a real process
+boundary. `WorkflowEngine` gained `withInitialContext(nodeId, Supplier<Map>)` so the CLI
+can seed a node's real input (a requirement file path; later, a downstream node's real
+upstream artifact) without the engine needing to know what any particular executor
+expects in its context, and without blocking `run`'s single call to wait between waves
+for the caller to compute a later node's input.
+
+**Trade-off.** The CLI's own demo pipeline is real but small: it does not exercise the
+full eight-stage SDLC end to end, only two stages, because that is what spec 05 actually
+asked to prove. Wiring the full pipeline's cross-node context threading into
+`WorkflowEngine` (or a dedicated context-building layer) is left for whichever later spec
+needs it, named here so it is not rediscovered as a surprise.
+
 ## Open items
 
 Gaps identified during the build that are deliberately deferred, not forgotten. Each one
 gets closed by a specific later spec, named here so it does not have to be rediscovered.
 
-- **AC-03-8's repo-wide scan of `runs/`.** Spec 03 requires that the Anthropic API key
-  never appears in any audit event, log line, or artifact, and names a repo-wide scan of
-  `runs/` as how to check it. That scan cannot exist yet: no node has written a real
-  artifact to `runs/<runId>/` because no executor exists to do so (spec 04) and no run
-  has actually persisted its state to disk (spec 05). What spec 03 delivered instead is
-  the narrower, currently-checkable claim: `AnthropicClient`'s own exception path
-  redacts the key, verified against a real HTTP response from a local test server. Spec
-  05, once runs are actually persisting artifacts and state to `runs/`, is where the
-  full repo-wide scan this criterion describes becomes possible to write and should be
-  added.
+- **CLOSED (spec 05): AC-03-8's repo-wide scan of `runs/`.** Spec 03 could only deliver
+  the narrower claim that `AnthropicClient`'s own exception path redacts the key,
+  verified against a real HTTP response from a local test server, since no run had yet
+  persisted real content to `runs/<runId>/`. Spec 05 makes both prerequisites real
+  (executors write real artifacts, `WorkflowEngine` persists `state.json` after every
+  wave), so `ApiKeyNeverLeaksIntoRunsTest` now does the actual scan: it makes one real,
+  live call to the Anthropic API through the real CLI (`Main.java run --live`), then
+  recursively scans every file under the resulting `runs/<runId>/` tree and the fixture
+  it recorded for the literal key value, asserting zero matches. Skips (does not silently
+  pass) when `ANTHROPIC_API_KEY` is not set.
+
+- **Cross-node context threading is not wired into `WorkflowEngine`.** Real spec-04
+  executors depend on the previous stage's real output (a design spec into
+  `ImplementExecutor`, a real diff into `DocumentExecutor`); today that threading only
+  happens by hand, once, in `FixtureRecorder`. `Main.java`'s CLI (spec 05) proves
+  persistence and resume against a small two-node demo workflow specifically to avoid
+  needing this; running the real eight-node `sdlc-default.json` through the CLI end to
+  end will need either `WorkflowEngine` itself to track and forward each completed node's
+  outputs to its dependents, or a dedicated context-building layer sitting between them.
+  Not attempted here since no spec has asked for it yet; named so it is not rediscovered
+  as a surprise when one does.
 
 - **Live fixtures for the node executors (spec 04) are not real recordings.** The
   account behind `ANTHROPIC_API_KEY` in this environment has no credit balance
