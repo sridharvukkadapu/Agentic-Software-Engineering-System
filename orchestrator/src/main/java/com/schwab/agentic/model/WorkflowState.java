@@ -5,8 +5,10 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -20,7 +22,17 @@ import java.util.concurrent.atomic.AtomicLong;
  * require, and a re-plan (spec 06) needs to reason about evidence and approvals across
  * every node in the run at once, not one node's private state.
  *
- * {@link #transition(WorkflowNode, NodeStatus, String, String)} is the only way a node's
+ * Node status is stored here, keyed by node id, not on {@link WorkflowNode} itself.
+ * {@link WorkflowNode} is an immutable record: any code path that deserializes a run
+ * (this class's {@link #fromJson}) or reconstructs a checkpoint (the execution engine,
+ * spec 02) builds fresh {@code WorkflowNode} instances from a definition, and those
+ * instances are not, and do not need to be, the same objects a {@link
+ * com.schwab.agentic.graph.WorkflowGraph} holds. Keying status by id instead of storing
+ * it on the node object is what makes that safe: two different WorkflowNode instances
+ * with the same id looking at this map's entry for that id will always agree, whereas
+ * two instances each carrying their own status field could not.
+ *
+ * {@link #transition(String, NodeStatus, String, String)} is the only way a node's
  * status changes, and {@link #record(AuditEvent.EventType, String, String, Map)} is the
  * only way any other kind of audit event is created. Both methods are synchronized on
  * this instance. Nodes execute in parallel starting with the execution engine (spec 02),
@@ -34,7 +46,8 @@ public final class WorkflowState {
 
     private final String runId;
     private final Instant startedAt;
-    private final Map<String, WorkflowNode> nodes;
+    private final Map<String, WorkflowNode> nodeDefinitions;
+    private final Map<String, NodeStatus> statuses;
     private final List<AuditEvent> auditLog = new ArrayList<>();
     private final List<Evidence> evidence = new ArrayList<>();
     private final List<DecisionRecord> decisions = new ArrayList<>();
@@ -47,16 +60,12 @@ public final class WorkflowState {
     private int replanCount;
 
     /**
-     * Builds a run over the given nodes, taking the exact {@link WorkflowNode} instances
-     * passed in rather than copying them. This constructor exists for tests and for
-     * {@link #fromJson}, which both need to hand this class nodes it did not receive
-     * from a {@link com.schwab.agentic.graph.WorkflowGraph}. Production code should
-     * prefer building a graph first and constructing state from it (a future overload,
-     * once the graph package is wired up by the execution engine), so the graph and the
-     * state a run tracks are guaranteed to be looking at the same node objects: a
-     * WorkflowGraph asked for ready nodes against a WorkflowState built from copies of
-     * its nodes would never see a status change the state recorded, since it would be
-     * reading a different object's field.
+     * Builds a run over the given node definitions, all starting at PENDING. Node
+     * identity does not matter here, only ids: this constructor copies the definitions
+     * into its own map and tracks status separately, so it is always safe to pass node
+     * definitions sourced from a {@link com.schwab.agentic.graph.WorkflowGraph}, from a
+     * fresh JSON parse, or from a checkpoint, without worrying about whether they are
+     * the same objects any other code holds.
      */
     public WorkflowState(String runId, RequirementSpec requirementSpec, List<WorkflowNode> nodes) {
         if (runId == null || runId.isBlank()) {
@@ -72,44 +81,46 @@ public final class WorkflowState {
         this.requirementSpec = requirementSpec;
         this.startedAt = Instant.now();
         this.workflowStatus = WorkflowStatus.RUNNING;
-        Map<String, WorkflowNode> byId = new LinkedHashMap<>();
+
+        Map<String, WorkflowNode> definitions = new LinkedHashMap<>();
+        Map<String, NodeStatus> initialStatuses = new HashMap<>();
         for (WorkflowNode node : nodes) {
-            if (byId.put(node.getId(), node) != null) {
-                throw new IllegalArgumentException("Duplicate node id in WorkflowState: " + node.getId());
+            if (definitions.put(node.id(), node) != null) {
+                throw new IllegalArgumentException("Duplicate node id in WorkflowState: " + node.id());
             }
+            initialStatuses.put(node.id(), NodeStatus.PENDING);
         }
-        this.nodes = byId;
+        this.nodeDefinitions = definitions;
+        this.statuses = initialStatuses;
     }
 
     /**
      * Changes one node's status. This is the only way a node status may change: it reads
-     * the node's current status as the observed "from", validates the transition against
-     * {@link NodeStatus#canTransitionTo}, applies it, and appends exactly one
-     * {@link AuditEvent} carrying the observed from and to. An illegal transition throws
-     * and leaves both the node and the audit log unchanged, so a caller can never observe
-     * a partially-applied transition.
+     * the node's current status from the status map as the observed "from", validates
+     * the transition against {@link NodeStatus#canTransitionTo}, applies it, and appends
+     * exactly one {@link AuditEvent} carrying the observed from and to. An illegal
+     * transition throws and leaves both the status map and the audit log unchanged, so a
+     * caller can never observe a partially-applied transition.
      */
-    public synchronized void transition(WorkflowNode node, NodeStatus to, String actor, String reason) {
-        if (node == null) {
-            throw new IllegalArgumentException("transition node must not be null");
+    public synchronized void transition(String nodeId, NodeStatus to, String actor, String reason) {
+        if (nodeId == null || nodeId.isBlank()) {
+            throw new IllegalArgumentException("transition nodeId must not be blank");
         }
-        if (!nodes.containsKey(node.getId()) || nodes.get(node.getId()) != node) {
-            throw new IllegalArgumentException(
-                "Node " + node.getId() + " does not belong to this WorkflowState");
+        if (!nodeDefinitions.containsKey(nodeId)) {
+            throw new IllegalArgumentException("Node " + nodeId + " does not belong to this WorkflowState");
         }
-        NodeStatus from = node.getStatus();
+        NodeStatus from = statuses.get(nodeId);
         if (!from.canTransitionTo(to)) {
-            throw new IllegalStateException(
-                "Illegal transition for node " + node.getId() + ": " + from + " -> " + to);
+            throw new IllegalStateException("Illegal transition for node " + nodeId + ": " + from + " -> " + to);
         }
-        node.setStatus(to);
+        statuses.put(nodeId, to);
         if (to == NodeStatus.PENDING && from == NodeStatus.FAILED) {
-            retryCounts.merge(node.getId(), 1, Integer::sum);
+            retryCounts.merge(nodeId, 1, Integer::sum);
         }
         if (to == NodeStatus.ROLLED_BACK) {
             rollbackCount++;
         }
-        auditLog.add(newAuditEvent(node.getId(), AuditEvent.EventType.STATUS_CHANGE, from, to, actor, reason, Map.of()));
+        auditLog.add(newAuditEvent(nodeId, AuditEvent.EventType.STATUS_CHANGE, from, to, actor, reason, Map.of()));
     }
 
     /**
@@ -117,7 +128,8 @@ public final class WorkflowState {
      * execution, an artifact written to disk, a policy denial, an approval, a re-plan, or
      * a resume. This, together with {@link #transition}, is the only way an
      * {@link AuditEvent} can come into existence, since {@code AuditEvent}'s constructor
-     * is package-private and this is the only other class in the package that builds one.
+     * is private to this package and this is the only other class in the package that
+     * builds one.
      */
     public synchronized void record(AuditEvent.EventType type, String actor, String reason,
                                      Map<String, Object> details) {
@@ -129,7 +141,7 @@ public final class WorkflowState {
 
     private AuditEvent newAuditEvent(String nodeId, AuditEvent.EventType type, NodeStatus from, NodeStatus to,
                                       String actor, String reason, Map<String, Object> details) {
-        return new AuditEvent(
+        return AuditEvent.create(
             sequence.incrementAndGet(),
             runId,
             nodeId,
@@ -172,16 +184,32 @@ public final class WorkflowState {
         this.requirementSpec = updated;
     }
 
+    /** The immutable definition of a node: id, dependencies, gates, risk, and so on. */
     public WorkflowNode getNode(String nodeId) {
-        WorkflowNode node = nodes.get(nodeId);
+        WorkflowNode node = nodeDefinitions.get(nodeId);
         if (node == null) {
             throw new IllegalArgumentException("No such node: " + nodeId);
         }
         return node;
     }
 
+    /** Every node definition this run tracks, keyed by id. */
     public Map<String, WorkflowNode> getNodes() {
-        return Map.copyOf(nodes);
+        return Map.copyOf(nodeDefinitions);
+    }
+
+    /** The current status of one node, looked up by id rather than by node identity. */
+    public synchronized NodeStatus getStatus(String nodeId) {
+        NodeStatus status = statuses.get(nodeId);
+        if (status == null) {
+            throw new IllegalArgumentException("No such node: " + nodeId);
+        }
+        return status;
+    }
+
+    /** A snapshot of every node's current status, keyed by id. */
+    public synchronized Map<String, NodeStatus> getStatuses() {
+        return Map.copyOf(statuses);
     }
 
     public synchronized List<AuditEvent> getAuditLog() {
@@ -255,8 +283,8 @@ public final class WorkflowState {
         root.put("requirementSpec", requirementSpecToJson(requirementSpec));
 
         List<Object> nodesJson = new ArrayList<>();
-        for (WorkflowNode node : nodes.values()) {
-            nodesJson.add(nodeToJson(node));
+        for (WorkflowNode node : nodeDefinitions.values()) {
+            nodesJson.add(nodeToJson(node, statuses.get(node.id())));
         }
         root.put("nodes", nodesJson);
 
@@ -297,9 +325,12 @@ public final class WorkflowState {
 
     /**
      * Reconstructs a run from a value tree previously produced by {@link #toJson}. Node
-     * statuses, the audit log, evidence, decisions, counters and the sequence counter are
-     * all restored exactly, so the returned instance behaves identically to the one that
-     * produced the JSON, including rejecting the same illegal transitions.
+     * definitions, statuses, the audit log, evidence, decisions, counters and the
+     * sequence counter are all restored exactly, so the returned instance behaves
+     * identically to the one that produced the JSON, including rejecting the same
+     * illegal transitions. The nodes constructed here are freshly-built WorkflowNode
+     * records; since status lives in this class's own map rather than on those records,
+     * their identity relative to any other in-memory graph does not matter.
      */
     @SuppressWarnings("unchecked")
     public static WorkflowState fromJson(Map<String, Object> root) {
@@ -307,11 +338,16 @@ public final class WorkflowState {
         RequirementSpec requirementSpec = requirementSpecFromJson((Map<String, Object>) root.get("requirementSpec"));
 
         List<WorkflowNode> nodeList = new ArrayList<>();
+        Map<String, NodeStatus> restoredStatuses = new HashMap<>();
         for (Object nodeObj : (List<Object>) root.get("nodes")) {
-            nodeList.add(nodeFromJson((Map<String, Object>) nodeObj));
+            Map<String, Object> nodeJson = (Map<String, Object>) nodeObj;
+            WorkflowNode node = nodeFromJson(nodeJson);
+            nodeList.add(node);
+            restoredStatuses.put(node.id(), NodeStatus.valueOf((String) nodeJson.get("status")));
         }
 
         WorkflowState state = new WorkflowState(runId, requirementSpec, nodeList);
+        state.statuses.putAll(restoredStatuses);
         state.workflowStatus = WorkflowStatus.valueOf((String) root.get("workflowStatus"));
         state.rollbackCount = ((Double) root.get("rollbackCount")).intValue();
         state.replanCount = ((Double) root.get("replanCount")).intValue();
@@ -379,34 +415,34 @@ public final class WorkflowState {
             criteria);
     }
 
-    private static Map<String, Object> nodeToJson(WorkflowNode node) {
+    private static Map<String, Object> nodeToJson(WorkflowNode node, NodeStatus status) {
         Map<String, Object> json = new LinkedHashMap<>();
-        json.put("id", node.getId());
-        json.put("name", node.getName());
-        json.put("executor", node.getExecutor());
-        json.put("dependsOn", new ArrayList<Object>(node.getDependsOn()));
-        json.put("entryGate", node.getEntryGate());
-        json.put("exitGate", node.getExitGate());
-        json.put("riskLevel", node.getRiskLevel().name());
-        json.put("maxAttempts", (double) node.getMaxAttempts());
-        json.put("producesEvidenceFor", new ArrayList<Object>(node.getProducesEvidenceFor()));
-        json.put("status", node.getStatus().name());
+        json.put("id", node.id());
+        json.put("name", node.name());
+        json.put("executor", node.executor());
+        json.put("dependsOn", new ArrayList<Object>(node.dependsOn()));
+        json.put("entryGate", node.entryGate());
+        json.put("exitGate", node.exitGate());
+        json.put("riskLevel", node.riskLevel().name());
+        json.put("maxAttempts", (double) node.maxAttempts());
+        json.put("producesEvidenceFor", new ArrayList<Object>(node.producesEvidenceFor()));
+        json.put("status", status.name());
         return json;
     }
 
     @SuppressWarnings("unchecked")
     private static WorkflowNode nodeFromJson(Map<String, Object> json) {
         List<Object> dependsOnRaw = (List<Object>) json.get("dependsOn");
-        java.util.Set<String> dependsOn = new java.util.LinkedHashSet<>();
+        Set<String> dependsOn = new LinkedHashSet<>();
         for (Object dep : dependsOnRaw) {
             dependsOn.add((String) dep);
         }
         List<Object> evidenceForRaw = (List<Object>) json.get("producesEvidenceFor");
-        java.util.Set<String> producesEvidenceFor = new java.util.LinkedHashSet<>();
+        Set<String> producesEvidenceFor = new LinkedHashSet<>();
         for (Object criterionId : evidenceForRaw) {
             producesEvidenceFor.add((String) criterionId);
         }
-        WorkflowNode node = new WorkflowNode(
+        return new WorkflowNode(
             (String) json.get("id"),
             (String) json.get("name"),
             (String) json.get("executor"),
@@ -416,8 +452,6 @@ public final class WorkflowState {
             RiskLevel.valueOf((String) json.get("riskLevel")),
             ((Double) json.get("maxAttempts")).intValue(),
             producesEvidenceFor);
-        node.setStatus(NodeStatus.valueOf((String) json.get("status")));
-        return node;
     }
 
     private static Map<String, Object> auditEventToJson(AuditEvent event) {
@@ -437,7 +471,7 @@ public final class WorkflowState {
 
     @SuppressWarnings("unchecked")
     private static AuditEvent auditEventFromJson(Map<String, Object> json) {
-        return new AuditEvent(
+        return AuditEvent.create(
             ((Double) json.get("sequence")).longValue(),
             (String) json.get("runId"),
             (String) json.get("nodeId"),

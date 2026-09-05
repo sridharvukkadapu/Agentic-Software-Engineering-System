@@ -13,12 +13,14 @@ import java.util.Set;
  * graph and a small diamond-shaped graph used to test downstream reachability against a
  * shape with real fan-out and rejoin, not just a straight chain.
  *
- * {@link #defaultSdlcState} is built from {@link #defaultSdlcGraph}'s own node
- * instances via {@link WorkflowGraph#getAllNodes}, never from a second, independently
- * constructed node list. Two separately-built WorkflowNode objects sharing an id are
- * unrelated as far as Java identity goes, so a graph and a state built from separate
- * copies would silently disagree about node status, which is exactly the bug this
- * pattern exists to avoid reintroducing.
+ * {@link #stateOver} builds a {@link WorkflowState} from a graph's own
+ * {@link WorkflowGraph#getAllNodes} rather than a second, independently typed-out node
+ * list, purely to avoid repeating eight node definitions twice per test. Node identity
+ * no longer matters for correctness the way it once did: {@link WorkflowNode} is
+ * immutable and status is tracked in {@code WorkflowState} keyed by id, so a graph and a
+ * state built from separately-constructed nodes with the same ids will still agree, as
+ * long as the caller reads status from the state (via {@code getStatuses()}) rather than
+ * from the graph.
  */
 final class TestGraphFixtures {
 

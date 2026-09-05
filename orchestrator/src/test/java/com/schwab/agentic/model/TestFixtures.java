@@ -59,9 +59,8 @@ final class TestFixtures {
      */
     static WorkflowState singleNodeState(NodeStatus startingStatus) {
         WorkflowState state = new WorkflowState("RUN-1", requirementSpec(), List.of(node("N1")));
-        WorkflowNode node = state.getNode("N1");
         for (NodeStatus step : pathTo(startingStatus)) {
-            state.transition(node, step, "system", "fixture setup: reaching " + startingStatus);
+            state.transition("N1", step, "system", "fixture setup: reaching " + startingStatus);
         }
         return state;
     }

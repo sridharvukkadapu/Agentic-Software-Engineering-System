@@ -62,12 +62,11 @@ public class NodeStatusTransitionTest {
                     continue;
                 }
                 WorkflowState state = TestFixtures.singleNodeState(from);
-                WorkflowNode node = state.getNode("N1");
 
                 int auditSizeBefore = state.getAuditLog().size();
-                state.transition(node, to, "system", "table-driven test " + from + " -> " + to);
+                state.transition("N1", to, "system", "table-driven test " + from + " -> " + to);
 
-                assertEquals(to, node.getStatus(), "node status after legal transition " + from + " -> " + to);
+                assertEquals(to, state.getStatus("N1"), "node status after legal transition " + from + " -> " + to);
                 assertEquals(auditSizeBefore + 1, state.getAuditLog().size(),
                     "expected exactly one new audit event for " + from + " -> " + to);
                 AuditEvent event = state.getAuditLog().get(state.getAuditLog().size() - 1);
@@ -84,14 +83,13 @@ public class NodeStatusTransitionTest {
                     continue;
                 }
                 WorkflowState state = TestFixtures.singleNodeState(from);
-                WorkflowNode node = state.getNode("N1");
                 int auditSizeBefore = state.getAuditLog().size();
 
                 assertThrows(IllegalStateException.class,
-                    () -> state.transition(node, to, "system", "should be rejected"),
+                    () -> state.transition("N1", to, "system", "should be rejected"),
                     "expected " + from + " -> " + to + " to be rejected");
 
-                assertEquals(from, node.getStatus(),
+                assertEquals(from, state.getStatus("N1"),
                     "node status must be unchanged after illegal transition " + from + " -> " + to);
                 assertEquals(auditSizeBefore, state.getAuditLog().size(),
                     "audit log must be unchanged after illegal transition " + from + " -> " + to);

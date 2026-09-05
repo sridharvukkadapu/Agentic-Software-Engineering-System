@@ -4,15 +4,19 @@ import java.util.Set;
 
 /**
  * One stage in the workflow graph: an id, its dependencies, the gates that guard entry
- * and exit, and its current status.
+ * and exit, its risk profile, and which acceptance criteria it produces evidence for.
  *
- * {@code setStatus} is package-private on purpose. If any class outside this package
- * could change a node's status directly, CLAUDE.md rule 1 would be unenforceable: nothing
- * would stop code from flipping a node to COMPLETED without ever calling
- * {@link WorkflowState#transition}, which is the only place an {@link AuditEvent} gets
- * created. Confining the setter to this package, and confining its only caller to
- * {@code WorkflowState}, is what makes rule 1 a structural guarantee rather than a
- * convention someone could forget to follow.
+ * This type is fully immutable and carries no status. Status lives in
+ * {@link WorkflowState}, keyed by node id, because a {@code WorkflowNode} instance is not
+ * guaranteed to be the only one that will ever exist for a given id: the execution
+ * engine's checkpoint and resume machinery (spec 02) and JSON deserialization
+ * ({@link WorkflowState#fromJson}) both construct fresh {@code WorkflowNode} objects from
+ * a workflow definition or a persisted run. If status lived on the node itself, a graph
+ * holding one set of node instances and a state holding a second, independently
+ * constructed set with the same ids would silently disagree about status, since a field
+ * mutation on one object is invisible to any other object, no matter how identical their
+ * ids are. Keying status by node id in one shared map sidesteps that entirely: identity
+ * of the WorkflowNode object stops mattering, only the id does.
  *
  * Entry and exit gates are stored as plain names, not objects, so a workflow JSON file
  * can reference a gate the same way it references an executor: as data. Resolving a name
@@ -20,31 +24,18 @@ import java.util.Set;
  * package's, so this class never needs to know what "compiles" or "human-approval"
  * actually check.
  */
-public final class WorkflowNode {
-
-    private final String id;
-    private final String name;
-    private final String executor;
-    private final Set<String> dependsOn;
-    private final String entryGate;
-    private final String exitGate;
-    private final RiskLevel riskLevel;
-    private final int maxAttempts;
-    private final Set<String> producesEvidenceFor;
-
-    private volatile NodeStatus status;
-
-    public WorkflowNode(
-        String id,
-        String name,
-        String executor,
-        Set<String> dependsOn,
-        String entryGate,
-        String exitGate,
-        RiskLevel riskLevel,
-        int maxAttempts,
-        Set<String> producesEvidenceFor
-    ) {
+public record WorkflowNode(
+    String id,
+    String name,
+    String executor,
+    Set<String> dependsOn,
+    String entryGate,
+    String exitGate,
+    RiskLevel riskLevel,
+    int maxAttempts,
+    Set<String> producesEvidenceFor
+) {
+    public WorkflowNode {
         if (id == null || id.isBlank()) {
             throw new IllegalArgumentException("WorkflowNode id must not be blank");
         }
@@ -60,64 +51,7 @@ public final class WorkflowNode {
         if (maxAttempts < 1) {
             throw new IllegalArgumentException("WorkflowNode maxAttempts must be at least 1, got " + maxAttempts);
         }
-        this.id = id;
-        this.name = name;
-        this.executor = executor;
-        this.dependsOn = dependsOn == null ? Set.of() : Set.copyOf(dependsOn);
-        this.entryGate = entryGate;
-        this.exitGate = exitGate;
-        this.riskLevel = riskLevel;
-        this.maxAttempts = maxAttempts;
-        this.producesEvidenceFor = producesEvidenceFor == null ? Set.of() : Set.copyOf(producesEvidenceFor);
-        this.status = NodeStatus.PENDING;
-    }
-
-    public String getId() {
-        return id;
-    }
-
-    public String getName() {
-        return name;
-    }
-
-    public String getExecutor() {
-        return executor;
-    }
-
-    public Set<String> getDependsOn() {
-        return dependsOn;
-    }
-
-    public String getEntryGate() {
-        return entryGate;
-    }
-
-    public String getExitGate() {
-        return exitGate;
-    }
-
-    public RiskLevel getRiskLevel() {
-        return riskLevel;
-    }
-
-    public int getMaxAttempts() {
-        return maxAttempts;
-    }
-
-    public Set<String> getProducesEvidenceFor() {
-        return producesEvidenceFor;
-    }
-
-    public NodeStatus getStatus() {
-        return status;
-    }
-
-    /**
-     * Sets this node's status directly. Package-private: the only caller allowed to be
-     * outside this file is {@link WorkflowState#transition}, which is in the same
-     * package. See the class Javadoc for why this boundary exists.
-     */
-    void setStatus(NodeStatus status) {
-        this.status = status;
+        dependsOn = dependsOn == null ? Set.of() : Set.copyOf(dependsOn);
+        producesEvidenceFor = producesEvidenceFor == null ? Set.of() : Set.copyOf(producesEvidenceFor);
     }
 }

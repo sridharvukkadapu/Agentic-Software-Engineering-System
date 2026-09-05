@@ -2,40 +2,48 @@ package com.schwab.agentic.model;
 
 import java.time.Instant;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * One entry in a run's audit log.
  *
  * This is the mechanism behind CLAUDE.md rule 1: audit events are derived, never
- * narrated. Both the type and its canonical constructor are package-private, so only
- * {@link WorkflowState}, in the same package, can create one, and it only does so inside
- * {@code transition} (for a status change) or {@code record} (for everything else). Java
- * does not allow a record's canonical constructor to be less visible than the record
- * itself, so keeping the constructor package-private required making the type
- * package-private too; a class outside this package can still read events returned from
- * {@link WorkflowState#getAuditLog} and call their accessors, it just cannot construct
- * one or declare a variable of this type by name. If a later piece needs to name this
- * type from another package (for example a metrics or reporting module), that is the
- * point to widen visibility, not a reason to widen it now.
+ * narrated. The constructor is private, and {@link #create} is package-private, so only
+ * {@link WorkflowState}, in the same package, can build one, and it only does so inside
+ * {@code transition} (for a status change) or {@code record} (for everything else). No
+ * other class can fabricate an event describing a change that did not actually happen,
+ * because no other class can reach the one factory method that builds this type.
+ *
+ * Unlike an earlier version of this class, {@code AuditEvent} itself is public: specs 08
+ * and 09 compute metrics and render reports from {@link WorkflowState#getAuditLog}, and
+ * both live in other packages. A record's canonical constructor cannot be less visible
+ * than the record type, so making construction package-private while keeping the type
+ * itself public required moving off the record's generated constructor entirely: this is
+ * a plain final class with a private constructor, a package-private static factory, and
+ * hand-written accessors and {@code equals}/{@code hashCode}/{@code toString}, which is
+ * more code than a record but is what lets the type be freely named, held in variables,
+ * and read by other packages while remaining impossible to construct there.
  *
  * {@code from} and {@code to} are populated only for {@link EventType#STATUS_CHANGE}
  * events; every other event type leaves them null and carries its information in
  * {@code details} instead. {@code nodeId} is null for events that are scoped to the run
  * rather than to a single node, such as {@code REPLAN} or {@code RUN_RESUMED}.
  */
-record AuditEvent(
-    long sequence,
-    String runId,
-    String nodeId,
-    EventType type,
-    NodeStatus from,
-    NodeStatus to,
-    String actor,
-    String reason,
-    Map<String, Object> details,
-    Instant timestamp
-) {
-    AuditEvent {
+public final class AuditEvent {
+
+    private final long sequence;
+    private final String runId;
+    private final String nodeId;
+    private final EventType type;
+    private final NodeStatus from;
+    private final NodeStatus to;
+    private final String actor;
+    private final String reason;
+    private final Map<String, Object> details;
+    private final Instant timestamp;
+
+    private AuditEvent(long sequence, String runId, String nodeId, EventType type, NodeStatus from, NodeStatus to,
+                        String actor, String reason, Map<String, Object> details, Instant timestamp) {
         if (runId == null || runId.isBlank()) {
             throw new IllegalArgumentException("AuditEvent runId must not be blank");
         }
@@ -64,7 +72,67 @@ record AuditEvent(
                     "Only STATUS_CHANGE events may carry from/to, got type " + type);
             }
         }
-        details = details == null ? Map.of() : Map.copyOf(details);
+        this.sequence = sequence;
+        this.runId = runId;
+        this.nodeId = nodeId;
+        this.type = type;
+        this.from = from;
+        this.to = to;
+        this.actor = actor;
+        this.reason = reason;
+        this.details = details == null ? Map.of() : Map.copyOf(details);
+        this.timestamp = timestamp;
+    }
+
+    /**
+     * The only way to build an {@link AuditEvent}. Package-private: only
+     * {@link WorkflowState#transition} and {@link WorkflowState#record}, in this same
+     * package, may call it.
+     */
+    static AuditEvent create(long sequence, String runId, String nodeId, EventType type, NodeStatus from,
+                              NodeStatus to, String actor, String reason, Map<String, Object> details,
+                              Instant timestamp) {
+        return new AuditEvent(sequence, runId, nodeId, type, from, to, actor, reason, details, timestamp);
+    }
+
+    public long sequence() {
+        return sequence;
+    }
+
+    public String runId() {
+        return runId;
+    }
+
+    public String nodeId() {
+        return nodeId;
+    }
+
+    public EventType type() {
+        return type;
+    }
+
+    public NodeStatus from() {
+        return from;
+    }
+
+    public NodeStatus to() {
+        return to;
+    }
+
+    public String actor() {
+        return actor;
+    }
+
+    public String reason() {
+        return reason;
+    }
+
+    public Map<String, Object> details() {
+        return details;
+    }
+
+    public Instant timestamp() {
+        return timestamp;
     }
 
     /**
@@ -87,6 +155,38 @@ record AuditEvent(
         line.append(" actor=").append(actor);
         line.append(" reason=\"").append(reason).append('"');
         return line.toString();
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+        if (this == obj) {
+            return true;
+        }
+        if (!(obj instanceof AuditEvent other)) {
+            return false;
+        }
+        return sequence == other.sequence
+            && runId.equals(other.runId)
+            && Objects.equals(nodeId, other.nodeId)
+            && type == other.type
+            && from == other.from
+            && to == other.to
+            && actor.equals(other.actor)
+            && reason.equals(other.reason)
+            && details.equals(other.details)
+            && timestamp.equals(other.timestamp);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(sequence, runId, nodeId, type, from, to, actor, reason, details, timestamp);
+    }
+
+    @Override
+    public String toString() {
+        return "AuditEvent[sequence=" + sequence + ", runId=" + runId + ", nodeId=" + nodeId
+            + ", type=" + type + ", from=" + from + ", to=" + to + ", actor=" + actor
+            + ", reason=" + reason + ", details=" + details + ", timestamp=" + timestamp + ']';
     }
 
     /**

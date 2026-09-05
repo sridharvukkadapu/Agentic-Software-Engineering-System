@@ -1,29 +1,22 @@
 package com.schwab.agentic.model;
 
-import static com.schwab.agentic.Assertions.assertFalse;
 import static com.schwab.agentic.Assertions.assertThrows;
 import static com.schwab.agentic.Assertions.assertTrue;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Modifier;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
 /**
- * Covers the structural guarantee behind CLAUDE.md rule 1: {@link AuditEvent} cannot be
- * constructed from outside {@link WorkflowState}'s package, and its own validation
- * rejects a STATUS_CHANGE event missing from/to or a non-STATUS_CHANGE event that
- * illegitimately carries them.
+ * Covers {@link AuditEvent}'s own validation: a STATUS_CHANGE event missing from/to, or
+ * a non-STATUS_CHANGE event illegitimately carrying them, must be rejected. The
+ * construction-visibility guarantees themselves (private constructor, package-private
+ * factory) are covered in {@link WorkflowStateTest}, alongside the rest of the
+ * WorkflowState-centric structural checks.
  */
 public class AuditEventTest {
-
-    public void testConstructorIsPackagePrivateNotPublic() throws Exception {
-        Constructor<AuditEvent> constructor = canonicalConstructor();
-        assertFalse(Modifier.isPublic(constructor.getModifiers()),
-            "AuditEvent constructor must not be public, only WorkflowState may build one");
-    }
 
     public void testStatusChangeEventRequiresFromAndTo() {
         assertThrows(IllegalArgumentException.class,
@@ -42,7 +35,7 @@ public class AuditEventTest {
     public void testToLogLineContainsSequenceTypeAndActor() {
         WorkflowState state = new WorkflowState("RUN-1", TestFixtures.requirementSpec(),
             List.of(TestFixtures.node("N1")));
-        state.transition(state.getNode("N1"), NodeStatus.RUNNING, "agent:implementer", "starting");
+        state.transition("N1", NodeStatus.RUNNING, "agent:implementer", "starting");
         AuditEvent event = state.getAuditLog().get(0);
 
         String line = event.toLogLine();

@@ -7,15 +7,16 @@ import static com.schwab.agentic.Assertions.assertNull;
 import static com.schwab.agentic.Assertions.assertThrows;
 import static com.schwab.agentic.Assertions.assertTrue;
 
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
-import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 /**
@@ -25,18 +26,36 @@ import java.util.stream.Collectors;
  */
 public class WorkflowStateTest {
 
-    public void testSetStatusIsNotPublicAndCannotBeCalledFromOutsideThePackage() throws Exception {
-        Method setStatus = WorkflowNode.class.getDeclaredMethod("setStatus", NodeStatus.class);
-        assertFalse(Modifier.isPublic(setStatus.getModifiers()), "WorkflowNode.setStatus must not be public");
-        assertFalse(Modifier.isProtected(setStatus.getModifiers()), "WorkflowNode.setStatus must not be protected");
+    public void testWorkflowNodeCarriesNoMutableStatusField() {
+        for (Method method : WorkflowNode.class.getDeclaredMethods()) {
+            assertFalse(method.getName().equals("setStatus"),
+                "WorkflowNode must not carry a status setter; status lives in WorkflowState, keyed by id");
+        }
+    }
+
+    public void testAuditEventCanonicalConstructorIsPrivate() throws Exception {
+        Constructor<AuditEvent> constructor = AuditEvent.class.getDeclaredConstructor(
+            long.class, String.class, String.class, AuditEvent.EventType.class,
+            NodeStatus.class, NodeStatus.class, String.class, String.class, Map.class, java.time.Instant.class);
+        assertTrue(Modifier.isPrivate(constructor.getModifiers()),
+            "AuditEvent's constructor must be private, only its package-private create() factory may call it");
+    }
+
+    public void testAuditEventCreateFactoryIsPackagePrivateNotPublic() throws Exception {
+        Method create = AuditEvent.class.getDeclaredMethod("create",
+            long.class, String.class, String.class, AuditEvent.EventType.class,
+            NodeStatus.class, NodeStatus.class, String.class, String.class, Map.class, java.time.Instant.class);
+        int modifiers = create.getModifiers();
+        assertFalse(Modifier.isPublic(modifiers), "AuditEvent.create must not be public");
+        assertFalse(Modifier.isProtected(modifiers), "AuditEvent.create must not be protected");
+        assertFalse(Modifier.isPrivate(modifiers), "AuditEvent.create must be package-private, not private");
     }
 
     public void testTransitionProducesExactlyOneAuditEventMatchingActualStatuses() {
         WorkflowState state = new WorkflowState("RUN-1", TestFixtures.requirementSpec(),
             List.of(TestFixtures.node("N1")));
-        WorkflowNode node = state.getNode("N1");
 
-        state.transition(node, NodeStatus.RUNNING, "agent:implementer", "starting work");
+        state.transition("N1", NodeStatus.RUNNING, "agent:implementer", "starting work");
 
         List<AuditEvent> log = state.getAuditLog();
         assertEquals(1, log.size(), "expected exactly one audit event after one transition");
@@ -51,14 +70,13 @@ public class WorkflowStateTest {
     public void testEachTransitionCarriesTheObservedFromNotAHardcodedValue() {
         WorkflowState state = new WorkflowState("RUN-1", TestFixtures.requirementSpec(),
             List.of(TestFixtures.node("N1")));
-        WorkflowNode node = state.getNode("N1");
 
-        state.transition(node, NodeStatus.RUNNING, "system", "step 1");
-        state.transition(node, NodeStatus.COMPLETED, "system", "step 2");
-        state.transition(node, NodeStatus.INVALIDATED, "system", "step 3");
-        state.transition(node, NodeStatus.PENDING, "system", "step 4");
-        state.transition(node, NodeStatus.RUNNING, "system", "step 5");
-        state.transition(node, NodeStatus.FAILED, "system", "step 6");
+        state.transition("N1", NodeStatus.RUNNING, "system", "step 1");
+        state.transition("N1", NodeStatus.COMPLETED, "system", "step 2");
+        state.transition("N1", NodeStatus.INVALIDATED, "system", "step 3");
+        state.transition("N1", NodeStatus.PENDING, "system", "step 4");
+        state.transition("N1", NodeStatus.RUNNING, "system", "step 5");
+        state.transition("N1", NodeStatus.FAILED, "system", "step 6");
 
         List<AuditEvent> log = state.getAuditLog();
         NodeStatus previousTo = NodeStatus.PENDING;
@@ -72,14 +90,13 @@ public class WorkflowStateTest {
     public void testIllegalTransitionThrowsAndAppendsNoAuditEvent() {
         WorkflowState state = new WorkflowState("RUN-1", TestFixtures.requirementSpec(),
             List.of(TestFixtures.node("N1")));
-        WorkflowNode node = state.getNode("N1");
 
         assertThrows(IllegalStateException.class,
-            () -> state.transition(node, NodeStatus.COMPLETED, "system", "cannot skip RUNNING"),
+            () -> state.transition("N1", NodeStatus.COMPLETED, "system", "cannot skip RUNNING"),
             "expected PENDING -> COMPLETED to be rejected");
 
         assertEquals(0, state.getAuditLog().size(), "no audit event should be appended on rejection");
-        assertEquals(NodeStatus.PENDING, node.getStatus(), "node status must be unchanged on rejection");
+        assertEquals(NodeStatus.PENDING, state.getStatus("N1"), "node status must be unchanged on rejection");
     }
 
     public void testRecordRejectsStatusChangeEventType() {
@@ -105,13 +122,32 @@ public class WorkflowStateTest {
         assertEquals("claude-sonnet-4-6", event.details().get("model"), "details map must round trip");
     }
 
+    public void testRecordDetailsCarryNestedListsAndMapsNotJustStrings() {
+        WorkflowState state = new WorkflowState("RUN-1", TestFixtures.requirementSpec(),
+            List.of(TestFixtures.node("N1"), TestFixtures.node("N2")));
+
+        state.record(AuditEvent.EventType.REPLAN, "system", "amendment after DESIGN", Map.of(
+            "invalidated", List.of("N2"),
+            "preserved", List.of("N1"),
+            "revokedEvidence", List.of(Map.of("criterionId", "AC-1", "producedByNode", "N2"))));
+
+        AuditEvent event = state.getAuditLog().get(0);
+        assertEquals(List.of("N2"), event.details().get("invalidated"), "nested list must round trip in details");
+        assertEquals(List.of("N1"), event.details().get("preserved"), "nested list must round trip in details");
+        @SuppressWarnings("unchecked")
+        List<Object> revoked = (List<Object>) event.details().get("revokedEvidence");
+        assertEquals(1, revoked.size(), "nested list of maps must round trip in details");
+        assertEquals(Map.of("criterionId", "AC-1", "producedByNode", "N2"), revoked.get(0),
+            "nested map inside a list inside details must round trip");
+    }
+
     public void testSequenceIsStrictlyIncreasingAcrossTransitionAndRecord() {
         WorkflowState state = new WorkflowState("RUN-1", TestFixtures.requirementSpec(),
             List.of(TestFixtures.node("N1"), TestFixtures.node("N2")));
 
-        state.transition(state.getNode("N1"), NodeStatus.RUNNING, "system", "a");
+        state.transition("N1", NodeStatus.RUNNING, "system", "a");
         state.record(AuditEvent.EventType.AGENT_CALL, "system", "b", Map.of());
-        state.transition(state.getNode("N2"), NodeStatus.RUNNING, "system", "c");
+        state.transition("N2", NodeStatus.RUNNING, "system", "c");
 
         List<AuditEvent> log = state.getAuditLog();
         for (int i = 1; i < log.size(); i++) {
@@ -123,13 +159,12 @@ public class WorkflowStateTest {
     public void testJsonRoundTripPreservesNodesAuditEvidenceAndCounters() {
         WorkflowState state = new WorkflowState("RUN-1", TestFixtures.requirementSpec(),
             List.of(TestFixtures.node("N1"), TestFixtures.node("N2", java.util.Set.of("N1"))));
-        WorkflowNode n1 = state.getNode("N1");
 
-        state.transition(n1, NodeStatus.RUNNING, "agent:implementer", "attempt 1");
-        state.transition(n1, NodeStatus.FAILED, "agent:implementer", "compile error");
-        state.transition(n1, NodeStatus.PENDING, "system", "retry");
-        state.transition(n1, NodeStatus.RUNNING, "agent:implementer", "attempt 2");
-        state.transition(n1, NodeStatus.COMPLETED, "agent:implementer", "compiled");
+        state.transition("N1", NodeStatus.RUNNING, "agent:implementer", "attempt 1");
+        state.transition("N1", NodeStatus.FAILED, "agent:implementer", "compile error");
+        state.transition("N1", NodeStatus.PENDING, "system", "retry");
+        state.transition("N1", NodeStatus.RUNNING, "agent:implementer", "attempt 2");
+        state.transition("N1", NodeStatus.COMPLETED, "agent:implementer", "compiled");
         state.record(AuditEvent.EventType.COMMAND_EXECUTED, "system", "ran build",
             Map.of("exitCode", 0.0, "durationMs", 1200.0));
         state.addEvidence(new Evidence(
@@ -146,9 +181,9 @@ public class WorkflowStateTest {
         assertEquals(state.getRunId(), restored.getRunId(), "runId must round trip");
         assertEquals(state.getWorkflowStatus(), restored.getWorkflowStatus(), "workflowStatus must round trip");
         assertEquals(state.getRetryCount("N1"), restored.getRetryCount("N1"), "retry count must round trip");
-        assertEquals(NodeStatus.COMPLETED, restored.getNode("N1").getStatus(), "N1 status must round trip");
-        assertEquals(NodeStatus.PENDING, restored.getNode("N2").getStatus(), "N2 status must round trip");
-        assertEquals(java.util.Set.of("N1"), restored.getNode("N2").getDependsOn(), "N2 dependsOn must round trip");
+        assertEquals(NodeStatus.COMPLETED, restored.getStatus("N1"), "N1 status must round trip");
+        assertEquals(NodeStatus.PENDING, restored.getStatus("N2"), "N2 status must round trip");
+        assertEquals(java.util.Set.of("N1"), restored.getNode("N2").dependsOn(), "N2 dependsOn must round trip");
 
         assertEquals(state.getAuditLog().size(), restored.getAuditLog().size(), "audit log size must round trip");
         for (int i = 0; i < state.getAuditLog().size(); i++) {
@@ -161,33 +196,95 @@ public class WorkflowStateTest {
         assertEquals(state.getRequirementSpec(), restored.getRequirementSpec(), "requirementSpec must round trip");
 
         assertDoesNotThrow(
-            () -> restored.transition(restored.getNode("N1"), NodeStatus.ROLLED_BACK, "system", "post-resume"),
+            () -> restored.transition("N1", NodeStatus.ROLLED_BACK, "system", "post-resume"),
             "restored state must still enforce and allow legal transitions after round trip");
         assertThrows(IllegalStateException.class,
-            () -> restored.transition(restored.getNode("N2"), NodeStatus.COMPLETED, "system", "illegal"),
+            () -> restored.transition("N2", NodeStatus.COMPLETED, "system", "illegal"),
             "restored state must still reject illegal transitions after round trip");
     }
 
-    public void testConcurrentTransitionsOnDifferentNodesProduceAConsistentAuditLog() throws InterruptedException {
-        int nodeCount = 20;
+    /**
+     * Restores a WorkflowState from JSON, loads the same workflow definition
+     * independently through WorkflowGraph, and confirms readyNodes computed against the
+     * restored statuses matches what the pre-persistence state would have produced. This
+     * is the scenario the earlier instance-aliasing fix did not actually cover: fromJson
+     * always builds brand new WorkflowNode objects, so if status lived on those objects
+     * instead of in WorkflowState's own map, a graph loaded separately (as the execution
+     * engine will do on resume) would have no way to see the restored statuses at all.
+     */
+    public void testReadyNodesAfterJsonRestoreReflectsRestoredStatusesAgainstAnIndependentlyLoadedGraph() {
+        WorkflowNode requirement = TestFixtures.node("REQUIREMENT");
+        WorkflowNode impact = TestFixtures.node("IMPACT", java.util.Set.of("REQUIREMENT"));
+        WorkflowNode design = TestFixtures.node("DESIGN", java.util.Set.of("IMPACT"));
+        WorkflowState original = new WorkflowState("RUN-1", TestFixtures.requirementSpec(),
+            List.of(requirement, impact, design));
+
+        original.transition("REQUIREMENT", NodeStatus.RUNNING, "system", "start");
+        original.transition("REQUIREMENT", NodeStatus.COMPLETED, "system", "done");
+        original.transition("IMPACT", NodeStatus.RUNNING, "system", "start");
+        original.transition("IMPACT", NodeStatus.COMPLETED, "system", "done");
+
+        String json = original.toJsonString();
+        WorkflowState restored = WorkflowState.fromJsonString(json);
+
+        com.schwab.agentic.graph.WorkflowGraph independentlyLoadedGraph =
+            com.schwab.agentic.graph.WorkflowGraph.of(List.of(
+                TestFixtures.node("REQUIREMENT"),
+                TestFixtures.node("IMPACT", java.util.Set.of("REQUIREMENT")),
+                TestFixtures.node("DESIGN", java.util.Set.of("IMPACT"))));
+
+        List<WorkflowNode> ready = independentlyLoadedGraph.readyNodes(restored.getStatuses());
+
+        assertEquals(1, ready.size(), "expected exactly DESIGN to be ready after restore");
+        assertEquals("DESIGN", ready.get(0).id(),
+            "readyNodes against a status map from a restored WorkflowState, checked against an"
+                + " independently loaded WorkflowGraph, must reflect the restored statuses");
+    }
+
+    /**
+     * 20 threads earlier only ever touched their own distinct node, so there was no
+     * shared mutable field for two threads to race on beyond the audit log itself, and
+     * removing synchronized from WorkflowState did not make that version of this test
+     * fail. This version drives many threads through repeated legal transition cycles on
+     * a small, shared set of nodes with a high iteration count, so the same node's status
+     * entry and the same audit log are genuinely contended. Verified to fail reliably
+     * with synchronized removed before being written this way; see the session record.
+     */
+    public void testConcurrentTransitionsUnderHeavyContentionProduceAConsistentAuditLog() throws InterruptedException {
+        int nodeCount = 4;
+        int threadsPerNode = 8;
+        int cyclesPerThread = 500;
+
         List<WorkflowNode> nodes = new java.util.ArrayList<>();
         for (int i = 0; i < nodeCount; i++) {
             nodes.add(TestFixtures.node("N" + i));
         }
         WorkflowState state = new WorkflowState("RUN-1", TestFixtures.requirementSpec(), nodes);
 
-        ExecutorService pool = Executors.newFixedThreadPool(nodeCount);
+        int totalThreads = nodeCount * threadsPerNode;
+        ExecutorService pool = Executors.newFixedThreadPool(totalThreads);
         CountDownLatch startLatch = new CountDownLatch(1);
-        CountDownLatch doneLatch = new CountDownLatch(nodeCount);
+        CountDownLatch doneLatch = new CountDownLatch(totalThreads);
+        AtomicInteger observedIllegalTransitions = new AtomicInteger(0);
 
-        for (int i = 0; i < nodeCount; i++) {
-            String nodeId = "N" + i;
+        for (int t = 0; t < totalThreads; t++) {
+            String nodeId = "N" + (t % nodeCount);
             pool.submit(() -> {
                 try {
                     startLatch.await();
-                    WorkflowNode node = state.getNode(nodeId);
-                    state.transition(node, NodeStatus.RUNNING, "system", "concurrent start");
-                    state.transition(node, NodeStatus.COMPLETED, "system", "concurrent finish");
+                    for (int cycle = 0; cycle < cyclesPerThread; cycle++) {
+                        try {
+                            state.transition(nodeId, NodeStatus.RUNNING, "system", "cycle start");
+                            state.transition(nodeId, NodeStatus.FAILED, "system", "cycle fail");
+                            state.transition(nodeId, NodeStatus.PENDING, "system", "cycle retry");
+                        } catch (IllegalStateException raceLost) {
+                            // Another thread's transition on the same node interleaved with this
+                            // one: expected under contention, since only one thread can legally
+                            // advance a given node at a time. Counted, not treated as a failure by
+                            // itself; what matters is whether the audit log stays consistent.
+                            observedIllegalTransitions.incrementAndGet();
+                        }
+                    }
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 } finally {
@@ -197,23 +294,22 @@ public class WorkflowStateTest {
         }
 
         startLatch.countDown();
-        boolean finished = doneLatch.await(10, TimeUnit.SECONDS);
+        boolean finished = doneLatch.await(30, TimeUnit.SECONDS);
         pool.shutdown();
         assertTrue(finished, "all concurrent transitions must complete within the timeout");
+        assertTrue(observedIllegalTransitions.get() > 0,
+            "expected genuine contention: multiple threads racing the same node's transitions"
+                + " should cause some of them to lose the race and see an illegal transition");
 
         List<AuditEvent> log = state.getAuditLog();
-        assertEquals(nodeCount * 2, log.size(), "expected exactly two audit events per node");
-
         List<Long> sequences = log.stream().map(AuditEvent::sequence).collect(Collectors.toList());
         List<Long> sortedUnique = sequences.stream().distinct().sorted().collect(Collectors.toList());
-        assertEquals(sequences.size(), sortedUnique.size(), "sequence numbers must be unique under concurrency");
-        for (int i = 0; i < nodeCount * 2; i++) {
-            assertEquals((long) (i + 1), sortedUnique.get(i), "sequence numbers must be contiguous starting at 1");
-        }
-
-        for (int i = 0; i < nodeCount; i++) {
-            assertEquals(NodeStatus.COMPLETED, state.getNode("N" + i).getStatus(),
-                "node N" + i + " must have reached COMPLETED");
+        assertEquals(sequences.size(), sortedUnique.size(),
+            "sequence numbers must be unique under heavy contention, found " + sequences.size()
+                + " events but only " + sortedUnique.size() + " unique sequence numbers");
+        for (int i = 0; i < sequences.size(); i++) {
+            assertEquals((long) (i + 1), sortedUnique.get(i),
+                "sequence numbers must be contiguous starting at 1 with no gaps under heavy contention");
         }
     }
 
@@ -230,10 +326,9 @@ public class WorkflowStateTest {
     public void testTransitionRejectsANodeThatDoesNotBelongToThisState() {
         WorkflowState state = new WorkflowState("RUN-1", TestFixtures.requirementSpec(),
             List.of(TestFixtures.node("N1")));
-        WorkflowNode foreignNode = TestFixtures.node("N1");
 
         assertThrows(IllegalArgumentException.class,
-            () -> state.transition(foreignNode, NodeStatus.RUNNING, "system", "foreign node"),
-            "transitioning a node instance not owned by this state must be rejected");
+            () -> state.transition("N2", NodeStatus.RUNNING, "system", "unknown node"),
+            "transitioning a node id not tracked by this state must be rejected");
     }
 }

@@ -4,7 +4,6 @@ import com.schwab.agentic.json.Json;
 import com.schwab.agentic.model.NodeStatus;
 import com.schwab.agentic.model.RiskLevel;
 import com.schwab.agentic.model.WorkflowNode;
-import com.schwab.agentic.model.WorkflowState;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -21,6 +20,18 @@ import java.util.Set;
 /**
  * The dependency graph a run executes over.
  *
+ * This class is pure structure and holds no mutable state of its own: it is built once
+ * from a list of {@link WorkflowNode} records, validates that structure, and answers
+ * questions about it (which nodes are ready given a status map, which nodes are
+ * downstream of a given node, how to render the graph). Node status is never asked about
+ * or stored here; {@link #readyNodes} takes a status snapshot as a parameter instead,
+ * because the graph itself has no way to observe status changes that happen elsewhere
+ * and should not pretend to. A version of this class that cached its own copy of node
+ * status was tried and found to disagree with {@link com.schwab.agentic.model.WorkflowState}
+ * about status after deserialization or checkpoint restore, since those code paths build
+ * fresh WorkflowNode instances; keeping this class entirely stateless removes the
+ * possibility of that disagreement rather than working around it.
+ *
  * Loading and validating are combined on purpose: a graph that failed to load is not
  * usable, so there is no state in which an invalid graph, one with a cycle, a dangling
  * dependency, more than one entry point, or more than one exit point, can be handed to
@@ -29,11 +40,6 @@ import java.util.Set;
  * "REQUIREMENT depends on NONEXISTENT" is. See {@link #checkSingleEntry} for why this
  * checks single-entry and single-terminal rather than the more literal "unreachable
  * node" a graph validator might otherwise implement.
- *
- * This class does not execute anything. It only answers questions about structure:
- * which nodes are ready to run given a state, which nodes are downstream of a given
- * node, and how to render the graph for a report. Scheduling and parallel wave execution
- * belong to the execution engine (spec 02).
  */
 public final class WorkflowGraph {
 
@@ -57,16 +63,16 @@ public final class WorkflowGraph {
 
         Map<String, WorkflowNode> byId = new LinkedHashMap<>();
         for (WorkflowNode node : nodes) {
-            if (byId.put(node.getId(), node) != null) {
-                throw new IllegalArgumentException("Duplicate node id in workflow graph: " + node.getId());
+            if (byId.put(node.id(), node) != null) {
+                throw new IllegalArgumentException("Duplicate node id in workflow graph: " + node.id());
             }
         }
 
         for (WorkflowNode node : nodes) {
-            for (String dependencyId : node.getDependsOn()) {
+            for (String dependencyId : node.dependsOn()) {
                 if (!byId.containsKey(dependencyId)) {
                     throw new IllegalArgumentException(
-                        "Node " + node.getId() + " depends on undeclared node " + dependencyId);
+                        "Node " + node.id() + " depends on undeclared node " + dependencyId);
                 }
             }
         }
@@ -148,9 +154,9 @@ public final class WorkflowGraph {
             dependents.put(id, new ArrayList<>());
         }
         for (WorkflowNode node : byId.values()) {
-            remainingDependencies.put(node.getId(), node.getDependsOn().size());
-            for (String dependencyId : node.getDependsOn()) {
-                dependents.get(dependencyId).add(node.getId());
+            remainingDependencies.put(node.id(), node.dependsOn().size());
+            for (String dependencyId : node.dependsOn()) {
+                dependents.get(dependencyId).add(node.id());
             }
         }
 
@@ -208,8 +214,8 @@ public final class WorkflowGraph {
     private static void checkSingleEntry(Map<String, WorkflowNode> byId) {
         Set<String> roots = new LinkedHashSet<>();
         for (WorkflowNode node : byId.values()) {
-            if (node.getDependsOn().isEmpty()) {
-                roots.add(node.getId());
+            if (node.dependsOn().isEmpty()) {
+                roots.add(node.id());
             }
         }
         if (roots.size() != 1) {
@@ -222,7 +228,7 @@ public final class WorkflowGraph {
     private static void checkSingleTerminal(Map<String, WorkflowNode> byId) {
         Set<String> hasDependents = new LinkedHashSet<>();
         for (WorkflowNode node : byId.values()) {
-            hasDependents.addAll(node.getDependsOn());
+            hasDependents.addAll(node.dependsOn());
         }
         Set<String> terminals = new LinkedHashSet<>(byId.keySet());
         terminals.removeAll(hasDependents);
@@ -245,15 +251,7 @@ public final class WorkflowGraph {
         return Set.copyOf(nodesById.keySet());
     }
 
-    /**
-     * Every node in this graph, in topological order, as the exact instances this graph
-     * holds. A {@link WorkflowState} for a run over this graph must be built from this
-     * list, not from a fresh copy of the same node definitions: sharing instances is what
-     * lets {@link #readyNodes} see the status changes {@code WorkflowState.transition}
-     * applies. Two separately-built WorkflowNode objects with the same id are, as far as
-     * Java is concerned, unrelated objects, and a status change on one is invisible to
-     * code holding the other.
-     */
+    /** Every node definition in this graph, in topological order. */
     public List<WorkflowNode> getAllNodes() {
         List<WorkflowNode> all = new ArrayList<>();
         for (String id : topologicalOrder) {
@@ -263,21 +261,26 @@ public final class WorkflowGraph {
     }
 
     /**
-     * The nodes that are schedulable right now: still PENDING, and every dependency is
-     * COMPLETED. This is what makes READY a derived, on-demand fact rather than a stored
-     * status: asking this question twice in a row can give different answers as the
-     * state changes, with nothing to keep in sync.
+     * The nodes that are schedulable right now given {@code statuses}: still PENDING,
+     * and every dependency is COMPLETED. Status is passed in rather than tracked by this
+     * class, since this class has no way to observe status changes made through
+     * {@link com.schwab.agentic.model.WorkflowState#transition} and should not hold a
+     * copy of state that could drift from the source of truth. This is also what makes
+     * READY a derived, on-demand fact rather than a stored status: asking this question
+     * twice with two different snapshots of {@code statuses} can give different answers,
+     * with nothing here to keep in sync.
      */
-    public List<WorkflowNode> readyNodes(WorkflowState state) {
+    public List<WorkflowNode> readyNodes(Map<String, NodeStatus> statuses) {
         List<WorkflowNode> ready = new ArrayList<>();
         for (String id : topologicalOrder) {
             WorkflowNode node = nodesById.get(id);
-            if (node.getStatus() != NodeStatus.PENDING) {
+            NodeStatus status = requireStatus(statuses, id);
+            if (status != NodeStatus.PENDING) {
                 continue;
             }
             boolean dependenciesComplete = true;
-            for (String dependencyId : node.getDependsOn()) {
-                if (state.getNode(dependencyId).getStatus() != NodeStatus.COMPLETED) {
+            for (String dependencyId : node.dependsOn()) {
+                if (requireStatus(statuses, dependencyId) != NodeStatus.COMPLETED) {
                     dependenciesComplete = false;
                     break;
                 }
@@ -287,6 +290,15 @@ public final class WorkflowGraph {
             }
         }
         return ready;
+    }
+
+    private NodeStatus requireStatus(Map<String, NodeStatus> statuses, String nodeId) {
+        NodeStatus status = statuses.get(nodeId);
+        if (status == null) {
+            throw new IllegalArgumentException(
+                "No status supplied for node " + nodeId + ": statuses map must cover every node in this graph");
+        }
+        return status;
     }
 
     /**
@@ -305,8 +317,8 @@ public final class WorkflowGraph {
             dependents.put(id, new ArrayList<>());
         }
         for (WorkflowNode node : nodesById.values()) {
-            for (String dependencyId : node.getDependsOn()) {
-                dependents.get(dependencyId).add(node.getId());
+            for (String dependencyId : node.dependsOn()) {
+                dependents.get(dependencyId).add(node.id());
             }
         }
 
@@ -327,20 +339,22 @@ public final class WorkflowGraph {
     }
 
     /**
-     * Renders this graph as a Mermaid flowchart with each node labelled by its current
-     * status, for embedding directly in the run report (spec 08).
+     * Renders this graph as a Mermaid flowchart labelled with the given statuses, for
+     * embedding directly in the run report (spec 08). Statuses come from the caller for
+     * the same reason {@link #readyNodes} takes them as a parameter: this class does not
+     * track status itself.
      */
-    public String toMermaid() {
+    public String toMermaid(Map<String, NodeStatus> statuses) {
         StringBuilder mermaid = new StringBuilder();
         mermaid.append("flowchart TD\n");
         for (String id : topologicalOrder) {
-            WorkflowNode node = nodesById.get(id);
+            NodeStatus status = requireStatus(statuses, id);
             mermaid.append("    ").append(id)
-                .append("[\"").append(id).append(" (").append(node.getStatus()).append(")\"]\n");
+                .append("[\"").append(id).append(" (").append(status).append(")\"]\n");
         }
         for (WorkflowNode node : nodesById.values()) {
-            for (String dependencyId : node.getDependsOn()) {
-                mermaid.append("    ").append(dependencyId).append(" --> ").append(node.getId()).append('\n');
+            for (String dependencyId : node.dependsOn()) {
+                mermaid.append("    ").append(dependencyId).append(" --> ").append(node.id()).append('\n');
             }
         }
         return mermaid.toString();

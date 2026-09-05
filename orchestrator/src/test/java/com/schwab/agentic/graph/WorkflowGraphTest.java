@@ -6,11 +6,10 @@ import static com.schwab.agentic.Assertions.assertThrows;
 import static com.schwab.agentic.Assertions.assertTrue;
 
 import com.schwab.agentic.model.NodeStatus;
-import com.schwab.agentic.model.RequirementSpec;
 import com.schwab.agentic.model.WorkflowNode;
 import com.schwab.agentic.model.WorkflowState;
-import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -113,10 +112,10 @@ public class WorkflowGraphTest {
         WorkflowGraph graph = TestGraphFixtures.defaultSdlcGraph();
         WorkflowState state = TestGraphFixtures.stateOver(graph);
 
-        List<WorkflowNode> ready = graph.readyNodes(state);
+        List<WorkflowNode> ready = graph.readyNodes(state.getStatuses());
 
         assertEquals(1, ready.size(), "expected exactly one ready node on a fresh state");
-        assertEquals("REQUIREMENT", ready.get(0).getId(), "the only ready node on a fresh state");
+        assertEquals("REQUIREMENT", ready.get(0).id(), "the only ready node on a fresh state");
     }
 
     public void testReadyNodesAfterRequirementCompletesReturnsOnlyImpact() {
@@ -124,10 +123,10 @@ public class WorkflowGraphTest {
         WorkflowState state = TestGraphFixtures.stateOver(graph);
         completeNode(state, "REQUIREMENT");
 
-        List<WorkflowNode> ready = graph.readyNodes(state);
+        List<WorkflowNode> ready = graph.readyNodes(state.getStatuses());
 
         assertEquals(1, ready.size(), "expected exactly one ready node after REQUIREMENT completes");
-        assertEquals("IMPACT", ready.get(0).getId(), "the only ready node after REQUIREMENT completes");
+        assertEquals("IMPACT", ready.get(0).id(), "the only ready node after REQUIREMENT completes");
     }
 
     public void testReadyNodesAfterDesignCompletesReturnsImplementTestAndDocumentTogether() {
@@ -137,8 +136,8 @@ public class WorkflowGraphTest {
         completeNode(state, "IMPACT");
         completeNode(state, "DESIGN");
 
-        List<WorkflowNode> ready = graph.readyNodes(state);
-        Set<String> readyIds = ready.stream().map(WorkflowNode::getId).collect(java.util.stream.Collectors.toSet());
+        List<WorkflowNode> ready = graph.readyNodes(state.getStatuses());
+        Set<String> readyIds = ready.stream().map(WorkflowNode::id).collect(java.util.stream.Collectors.toSet());
 
         assertEquals(Set.of("IMPLEMENT", "TEST", "DOCUMENT"), readyIds,
             "expected IMPLEMENT, TEST and DOCUMENT to fan out together after DESIGN completes");
@@ -153,16 +152,24 @@ public class WorkflowGraphTest {
         completeNode(state, "IMPLEMENT");
         completeNode(state, "TEST");
 
-        List<WorkflowNode> ready = graph.readyNodes(state);
-        Set<String> readyIds = ready.stream().map(WorkflowNode::getId).collect(java.util.stream.Collectors.toSet());
+        List<WorkflowNode> ready = graph.readyNodes(state.getStatuses());
+        Set<String> readyIds = ready.stream().map(WorkflowNode::id).collect(java.util.stream.Collectors.toSet());
 
         assertTrue(!readyIds.contains("VALIDATE"),
             "VALIDATE must not be ready until DOCUMENT also completes, ready was: " + readyIds);
 
         completeNode(state, "DOCUMENT");
-        List<WorkflowNode> readyAfterAll = graph.readyNodes(state);
+        List<WorkflowNode> readyAfterAll = graph.readyNodes(state.getStatuses());
         assertEquals(1, readyAfterAll.size(), "expected only VALIDATE to be ready once all three complete");
-        assertEquals("VALIDATE", readyAfterAll.get(0).getId(), "VALIDATE must become ready once the fan-out joins");
+        assertEquals("VALIDATE", readyAfterAll.get(0).id(), "VALIDATE must become ready once the fan-out joins");
+    }
+
+    public void testReadyNodesThrowsWhenStatusesMapDoesNotCoverEveryNode() {
+        WorkflowGraph graph = TestGraphFixtures.defaultSdlcGraph();
+
+        assertThrows(IllegalArgumentException.class,
+            () -> graph.readyNodes(Map.of("REQUIREMENT", NodeStatus.PENDING)),
+            "readyNodes must reject a statuses map missing entries for some nodes in the graph");
     }
 
     public void testTopologicalOrderPlacesEveryNodeAfterItsDependencies() {
@@ -175,7 +182,7 @@ public class WorkflowGraphTest {
         }
         for (String id : order) {
             WorkflowNode node = graph.getNode(id);
-            for (String dependencyId : node.getDependsOn()) {
+            for (String dependencyId : node.dependsOn()) {
                 assertTrue(position.get(dependencyId) < position.get(id),
                     dependencyId + " must appear before " + id + " in topological order");
             }
@@ -184,7 +191,11 @@ public class WorkflowGraphTest {
 
     public void testToMermaidContainsEveryNodeIdAndEdge() {
         WorkflowGraph graph = TestGraphFixtures.diamondGraph();
-        String mermaid = graph.toMermaid();
+        Map<String, NodeStatus> statuses = Map.of(
+            "TOP", NodeStatus.COMPLETED, "LEFT", NodeStatus.RUNNING,
+            "RIGHT", NodeStatus.PENDING, "BOTTOM", NodeStatus.PENDING);
+
+        String mermaid = graph.toMermaid(statuses);
 
         assertTrue(mermaid.contains("flowchart TD"), "mermaid output must declare a flowchart");
         for (String id : Set.of("TOP", "LEFT", "RIGHT", "BOTTOM")) {
@@ -192,6 +203,7 @@ public class WorkflowGraphTest {
         }
         assertTrue(mermaid.contains("TOP --> LEFT"), "mermaid output must contain the TOP -> LEFT edge");
         assertTrue(mermaid.contains("TOP --> RIGHT"), "mermaid output must contain the TOP -> RIGHT edge");
+        assertTrue(mermaid.contains("COMPLETED"), "mermaid output must reflect the supplied status for TOP");
     }
 
     public void testLoadFromJsonRejectsAMalformedWorkflowRoot() {
@@ -201,8 +213,7 @@ public class WorkflowGraphTest {
     }
 
     private static void completeNode(WorkflowState state, String nodeId) {
-        WorkflowNode node = state.getNode(nodeId);
-        state.transition(node, NodeStatus.RUNNING, "system", "test setup");
-        state.transition(node, NodeStatus.COMPLETED, "system", "test setup");
+        state.transition(nodeId, NodeStatus.RUNNING, "system", "test setup");
+        state.transition(nodeId, NodeStatus.COMPLETED, "system", "test setup");
     }
 }
