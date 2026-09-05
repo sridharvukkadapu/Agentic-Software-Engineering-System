@@ -123,38 +123,83 @@ public class WorkflowEngineTest {
                 + " the failing executor wrote; got: " + contentAfterRollback);
     }
 
-    public void testRollbackOfACompletedNodeActuallyRestoresFiles() throws IOException {
+    /**
+     * A single node's own rollback restores that node's own checkpoint. maxAttempts=1 so
+     * N1's single failing attempt exhausts its budget immediately and rolls back to the
+     * checkpoint taken for N1 specifically, before N1's own attempt ran.
+     */
+    public void testRollbackOfANodeThatCompletedItsOwnAttemptButFailedTheExitGateRestoresItsOwnCheckpoint() throws IOException {
         Path targetServiceDir = Files.createTempDirectory("engine-target-service");
         Path runsDir = Files.createTempDirectory("engine-runs");
         Path mutableFile = targetServiceDir.resolve("Service.java");
         Files.writeString(mutableFile, "original content");
 
-        WorkflowNode completedNode = TestEngineFixtures.node("N1", Set.of(), 1);
-        WorkflowNode failingNode = TestEngineFixtures.node("N2", Set.of("N1"), 1);
-        WorkflowGraph graph = WorkflowGraph.of(List.of(completedNode, failingNode));
+        WorkflowNode node = TestEngineFixtures.node("N1", Set.of(), 1);
+        WorkflowGraph graph = WorkflowGraph.of(List.of(node));
         WorkflowState state = new WorkflowState("RUN-1", TestEngineFixtures.requirementSpec(), graph.getAllNodes());
 
-        ControllableExecutor executor = new ControllableExecutor();
-        Path artifactForN1 = targetServiceDir.resolve("n1-artifact.txt");
-        executor.alwaysReturn("N1", ControllableExecutor.Outcome.success("N1 completes", artifactForN1, "n1 output"));
-        executor.alwaysReturn("N2", ControllableExecutor.Outcome.failure("N2 fails after N1 already completed"));
+        NodeExecutor executor = (n, context) -> {
+            try {
+                Files.writeString(mutableFile, "N1 mutated this and then its exit gate failed it");
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+            return new NodeExecutor.ExecutionOutput(true, "N1 ran but wrote no declared artifact", Map.of());
+        };
 
-        Checkpoint checkpoint = new Checkpoint();
         WorkflowEngine engine = new WorkflowEngine(graph, state, registryWith(executor), new Gates(),
-            new PolicyEngine.AllowAllPolicyEngine(), checkpoint, targetServiceDir, runsDir,
+            new PolicyEngine.AllowAllPolicyEngine(), new Checkpoint(), targetServiceDir, runsDir,
             new CommandRunner(), null, null);
 
         WorkflowStatus outcome = engine.run();
 
-        assertEquals(WorkflowStatus.SAFE_STOPPED, outcome, "N2 exhausts its budget with no fallback");
+        assertEquals(WorkflowStatus.SAFE_STOPPED, outcome, "N1 exhausts its budget with no fallback");
+        assertEquals(NodeStatus.ROLLED_BACK, state.getStatus("N1"), "N1 must show ROLLED_BACK");
+        assertEquals("original content", Files.readString(mutableFile),
+            "N1's own rollback must restore the file to what it was before N1's own attempt ran");
+    }
 
-        String restoredContent = Files.readString(mutableFile);
-        assertEquals("original content", restoredContent,
-            "rollback must restore the tree to its state when the checkpoint was taken, reading the file back directly");
-        assertFalse(Files.exists(artifactForN1),
-            "N1's artifact was created after the checkpoint (during N1's own COMPLETED run), so rollback"
-                + " triggered by N2's failure must remove it too: rollback undoes a COMPLETED node's work,"
-                + " not just a RUNNING one's");
+    /**
+     * The test this replaces asserted that a sibling's rollback deleted a COMPLETED
+     * node's already-written artifact. That was documenting a real bug, not covering
+     * intended behavior: a single run-level checkpoint cannot support spec 06, which
+     * must preserve a completed node's output untouched while re-planning invalidates
+     * and re-runs only its downstream nodes. With per-node checkpointing, A's checkpoint
+     * and B's checkpoint are entirely separate snapshots, so B's rollback (restoring only
+     * B's own checkpoint) has no way to touch a file A wrote after A's own checkpoint was
+     * taken. This test proves that directly: A completes and writes a real artifact, B
+     * (which depends on A) then fails and rolls back, and A's artifact is verified still
+     * present and unchanged by reading it back afterward.
+     */
+    public void testANodeCompletesBRollsBackAndACompletedArtifactSurvivesReadByReadingItBack() throws IOException {
+        Path targetServiceDir = Files.createTempDirectory("engine-target-service");
+        Path runsDir = Files.createTempDirectory("engine-runs");
+
+        WorkflowNode nodeA = TestEngineFixtures.node("A", Set.of(), 1);
+        WorkflowNode nodeB = TestEngineFixtures.node("B", Set.of("A"), 1);
+        WorkflowGraph graph = WorkflowGraph.of(List.of(nodeA, nodeB));
+        WorkflowState state = new WorkflowState("RUN-1", TestEngineFixtures.requirementSpec(), graph.getAllNodes());
+
+        Path artifactForA = targetServiceDir.resolve("a-artifact.txt");
+        String aContent = "A's real, completed output, must survive B's rollback";
+        ControllableExecutor executor = new ControllableExecutor();
+        executor.alwaysReturn("A", ControllableExecutor.Outcome.success("A completes", artifactForA, aContent));
+        executor.alwaysReturn("B", ControllableExecutor.Outcome.failure("B fails and exhausts its budget"));
+
+        WorkflowEngine engine = new WorkflowEngine(graph, state, registryWith(executor), new Gates(),
+            new PolicyEngine.AllowAllPolicyEngine(), new Checkpoint(), targetServiceDir, runsDir,
+            new CommandRunner(), null, null);
+
+        WorkflowStatus outcome = engine.run();
+
+        assertEquals(WorkflowStatus.SAFE_STOPPED, outcome, "B exhausts its budget with no fallback");
+        assertEquals(NodeStatus.COMPLETED, state.getStatus("A"), "A must remain COMPLETED: only B rolled back");
+        assertEquals(NodeStatus.ROLLED_BACK, state.getStatus("B"), "B must show ROLLED_BACK");
+
+        assertTrue(Files.exists(artifactForA),
+            "A's artifact must still exist on disk after B's rollback: B's checkpoint is separate from A's");
+        assertEquals(aContent, Files.readString(artifactForA),
+            "A's artifact content must be unchanged, read back directly from disk, not inferred from status");
     }
 
     public void testThreeParallelNodesAllReachCompletedBeforeTheJoinNodeStartsAndAuditLogProvesIt() throws IOException {

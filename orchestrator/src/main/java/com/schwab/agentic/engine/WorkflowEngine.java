@@ -37,11 +37,17 @@ import java.util.concurrent.Future;
  * checkpoint theatre and would defeat a policy rule that must deny before anything is
  * written, not after.
  *
- * A checkpoint of the target service working tree, if one is configured for this run, is
- * taken exactly once, before the first wave, and its handle is kept for the life of this
- * engine instance. Rollback always restores to that one checkpoint: this spec's "taken
- * before the first node that mutates the target service" describes a single point in
- * time, not a per-node snapshot.
+ * A checkpoint is taken per node, not per run: immediately before a node's first attempt
+ * (never before a retry of the same node, which would only capture that node's own
+ * partial damage rather than the state before it touched anything), the engine snapshots
+ * the target service working tree under {@code runs/<runId>/checkpoints/<nodeId>/} and
+ * keeps that node's handle for the life of this engine instance. Rolling back a node
+ * restores only that node's own checkpoint, never another node's. A single run-level
+ * checkpoint was tried first and found to actively contradict spec 06: re-planning must
+ * be able to preserve a completed node's output untouched while invalidating and
+ * re-running only its downstream nodes, which is impossible if every rollback in the run
+ * shares one snapshot, since restoring it would also undo whatever the preserved node had
+ * legitimately produced after that snapshot was taken.
  */
 public final class WorkflowEngine {
 
@@ -59,7 +65,7 @@ public final class WorkflowEngine {
     private final String buildCommand;
     private final String testCommand;
 
-    private Checkpoint.Handle checkpointHandle;
+    private final Map<String, Checkpoint.Handle> checkpointHandlesByNodeId = new HashMap<>();
     private boolean safeStopRequested;
 
     public WorkflowEngine(WorkflowGraph graph, WorkflowState state, NodeExecutorRegistry executors,
@@ -112,8 +118,6 @@ public final class WorkflowEngine {
      * Returns the final {@link WorkflowStatus}, which is also recorded on {@code state}.
      */
     public WorkflowStatus run() {
-        takeInitialCheckpointIfConfigured();
-
         int iteration = 0;
         while (true) {
             iteration++;
@@ -152,11 +156,20 @@ public final class WorkflowEngine {
         }
     }
 
-    private void takeInitialCheckpointIfConfigured() {
-        if (targetServiceDirectory == null || runsDirectory == null || checkpointHandle != null) {
+    /**
+     * Takes a checkpoint for this node under {@code runs/<runId>/checkpoints/<nodeId>/}
+     * if one has not already been taken for it, capturing the working tree as it stands
+     * immediately before this node's first attempt. Called once per node, not once per
+     * retry: a retry re-executes the same node, so re-checkpointing before a retry would
+     * capture that node's own prior (failed) attempt's damage rather than the clean
+     * state from before the node ever ran, which is what rollback needs to restore to.
+     */
+    private void takeCheckpointForNodeIfConfigured(WorkflowNode node) {
+        if (targetServiceDirectory == null || runsDirectory == null) {
             return;
         }
-        checkpointHandle = checkpoint.take(targetServiceDirectory, runsDirectory, state.getRunId(), "initial");
+        checkpointHandlesByNodeId.computeIfAbsent(node.id(),
+            nodeId -> checkpoint.take(targetServiceDirectory, runsDirectory, state.getRunId(), nodeId));
     }
 
     /**
@@ -255,6 +268,7 @@ public final class WorkflowEngine {
      * never hang or crash the wave for its siblings.
      */
     private void executeOneNode(WorkflowNode node) {
+        takeCheckpointForNodeIfConfigured(node);
         Map<String, Object> context = new HashMap<>();
         try {
             runAttemptsUntilOutcome(node, context);
@@ -355,21 +369,26 @@ public final class WorkflowEngine {
     }
 
     /**
-     * Rolls back to the checkpoint taken at run start, then marks the node FAILED and
-     * requests a safe stop. The rollback is a real file restore verified by content
-     * hash, performed by {@link Checkpoint#restore}, which is the only thing allowed to
-     * emit a ROLLBACK-style audit event, and only after the files are actually back; this
+     * Rolls back this node's own checkpoint, then marks the node FAILED and requests a
+     * safe stop. Restoring only this node's checkpoint, never another node's, is what
+     * lets an unaffected completed node's output survive a sibling's rollback: A's
+     * checkpoint is never touched by B's failure, because B's rollback only knows about
+     * B's own handle. The rollback is a real file restore verified by content hash,
+     * performed by {@link Checkpoint#restore}, which is the only thing allowed to emit a
+     * ROLLBACK-style audit event, and only after the files are actually back; this
      * method only decides that a rollback should happen and reacts to its result. If no
-     * checkpoint was ever taken (no target service directory configured for this run),
-     * rollback is skipped and the node simply fails, since there is nothing to restore.
+     * checkpoint was ever taken for this node (no target service directory configured
+     * for this run), rollback is skipped and the node simply fails, since there is
+     * nothing to restore.
      */
     private void rollBackAndFail(WorkflowNode node, String reason) {
-        if (checkpointHandle != null) {
-            int restoredCount = checkpoint.restore(checkpointHandle);
+        Checkpoint.Handle handle = checkpointHandlesByNodeId.get(node.id());
+        if (handle != null) {
+            int restoredCount = checkpoint.restore(handle);
             state.record(AuditEvent.EventType.ARTIFACT_WRITTEN, "engine",
                 "rollback restored " + restoredCount + " file(s) for node " + node.id() + " after: " + reason,
                 Map.of("nodeId", node.id(), "restoredFileCount", (double) restoredCount,
-                    "checkpoint", checkpointHandle.label()));
+                    "checkpoint", handle.label()));
             if (state.getStatus(node.id()).canTransitionTo(NodeStatus.ROLLED_BACK)) {
                 state.transition(node.id(), NodeStatus.ROLLED_BACK, "engine", "rolled back after: " + reason);
             }

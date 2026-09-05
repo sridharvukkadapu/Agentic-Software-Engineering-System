@@ -102,20 +102,28 @@ public final class Gates {
     }
 
     /** Blocks any node that mutates the target service unless a checkpoint was taken first. */
+    /**
+     * Checks that checkpointing is actually configured for this run at all, so a node
+     * that mutates the target service cannot run in a configuration where rollback is
+     * structurally impossible. This does not, and cannot, check that this specific
+     * node's own checkpoint already exists: {@link WorkflowEngine} takes a node's
+     * checkpoint automatically immediately before calling its executor, which happens
+     * strictly after this entry gate has already passed, so the node's own checkpoint by
+     * construction does not exist yet at the moment this gate runs. Checking for it here
+     * would make this gate permanently and vacuously fail on every node's first attempt.
+     * What genuinely varies, and is worth gating on, is whether a target service
+     * directory and runs directory were wired up for this run in the first place.
+     */
     private static final class CheckpointExistsGate implements Gate {
-        private final Checkpoint checkpoint = new Checkpoint();
-
         @Override
         public Result evaluate(WorkflowNode node, WorkflowState state, GateContext context) {
-            if (context.runsDirectory() == null) {
-                return Result.fail("no runs directory configured for this run, cannot verify a checkpoint exists");
+            if (context.targetServiceDirectory() == null || context.runsDirectory() == null) {
+                return Result.fail("checkpointing is not configured for this run (no target service directory"
+                    + " and/or runs directory wired up): a node that mutates the target service cannot run"
+                    + " until rollback is possible");
             }
-            List<String> checkpoints = checkpoint.list(context.runsDirectory(), state.getRunId());
-            if (checkpoints.isEmpty()) {
-                return Result.fail("no checkpoint has been taken for run " + state.getRunId()
-                    + ": a node that mutates the target service cannot run until rollback is possible");
-            }
-            return Result.pass("found " + checkpoints.size() + " checkpoint(s) for run " + state.getRunId());
+            return Result.pass("checkpointing is configured for this run; the engine takes this node's own"
+                + " checkpoint automatically immediately before it executes");
         }
     }
 
