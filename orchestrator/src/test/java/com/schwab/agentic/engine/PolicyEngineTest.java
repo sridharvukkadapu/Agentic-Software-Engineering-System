@@ -92,6 +92,41 @@ public class PolicyEngineTest {
         assertEquals("critical-risk-requires-approval", result.ruleName(), "the firing rule must be named");
     }
 
+    /**
+     * Required test (AC-05-7): an approval granted at revision 1 does not satisfy the
+     * same node once the requirement has been replaced at revision 2. This is what makes
+     * a real ApprovalStore, wired through PolicyContext, actually clear an approval
+     * requirement, not merely a store that never gets asked; the real risk this
+     * guards against is a re-plan (spec 06) silently reusing a stale approval that a
+     * human granted against a requirement that no longer describes what the node is
+     * about to do.
+     */
+    public void testApprovalGrantedAtRevisionOneDoesNotSatisfyTheSameNodeAtRevisionTwo() {
+        RealPolicyEngine engine = newEngine();
+        WorkflowNode node = nodeWithRisk("IMPLEMENT", RiskLevel.HIGH);
+        RequirementSpec revisionOne = new RequirementSpec("REQ-1", 1, "req", "req normalized", List.of());
+        WorkflowState state = new WorkflowState("RUN-1", revisionOne, List.of(node));
+
+        ApprovalStore approvalStore = new ApprovalStore();
+        approvalStore.record(new ApprovalRecord("IMPLEMENT", 1, ApprovalRecord.Decision.APPROVED,
+            "human:reviewer", "diff reviewed at revision 1", Instant.now()));
+
+        PolicyContext contextAtRevisionOne = new PolicyContext(null, null, "RUN-1", false, approvalStore);
+        PolicyRule.Result resultAtRevisionOne = engine.evaluatePreExecutionWithReason(node, state, contextAtRevisionOne);
+        assertEquals(PolicyEngine.Decision.ALLOW, resultAtRevisionOne.decision(),
+            "the real approval at revision 1 must clear the HIGH-risk approval requirement at revision 1: "
+                + resultAtRevisionOne.reason());
+
+        RequirementSpec revisionTwo = revisionOne.withNextRevision("amended req", "amended req normalized", List.of());
+        state.replaceRequirementSpec(revisionTwo);
+
+        PolicyContext contextAtRevisionTwo = new PolicyContext(null, null, "RUN-1", false, approvalStore);
+        PolicyRule.Result resultAtRevisionTwo = engine.evaluatePreExecutionWithReason(node, state, contextAtRevisionTwo);
+        assertEquals(PolicyEngine.Decision.REQUIRE_APPROVAL, resultAtRevisionTwo.decision(),
+            "the same node, at the same real ApprovalStore, must require a fresh approval once the requirement"
+                + " has moved to revision 2: the revision-1 approval must not be silently reused");
+    }
+
     // ---- 2. high-risk-requires-approval ----
 
     public void testHighRiskNodeRequiresApprovalUnlessAutoApprove() {

@@ -6,6 +6,9 @@ import com.schwab.agentic.model.NodeStatus;
 import com.schwab.agentic.model.WorkflowNode;
 import com.schwab.agentic.model.WorkflowState;
 import com.schwab.agentic.model.WorkflowStatus;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -87,6 +90,7 @@ public final class WorkflowEngine {
     private final String buildCommand;
     private final String testCommand;
     private final boolean autoApprove;
+    private final ApprovalStore approvalStore;
 
     // ConcurrentHashMap, not HashMap: nodes in the same wave execute on separate virtual
     // threads (see executeWaveAndWaitForAll), and takeCheckpointForNodeIfConfigured's
@@ -111,7 +115,7 @@ public final class WorkflowEngine {
                            Path targetServiceDirectory, Path runsDirectory,
                            CommandRunner commandRunner, String buildCommand, String testCommand) {
         this(graph, state, executors, gates, policyEngine, checkpoint, targetServiceDirectory, runsDirectory,
-            commandRunner, buildCommand, testCommand, false);
+            commandRunner, buildCommand, testCommand, false, new ApprovalStore());
     }
 
     /**
@@ -122,12 +126,17 @@ public final class WorkflowEngine {
      * demo run from a governed one; this constructor does not itself enforce the
      * replay-only restriction, since that is a property of how the CLI assembles a run,
      * not of the engine's own scheduling logic.
+     *
+     * {@code approvalStore} is the run's approval history, loaded from
+     * {@code runs/<runId>/approvals.json} on resume or freshly empty for a new run; it is
+     * what lets a pre-execution approval rule tell an already-approved node from one that
+     * genuinely still needs a human decision.
      */
     public WorkflowEngine(WorkflowGraph graph, WorkflowState state, NodeExecutorRegistry executors,
                            Gates gates, PolicyEngine policyEngine, Checkpoint checkpoint,
                            Path targetServiceDirectory, Path runsDirectory,
                            CommandRunner commandRunner, String buildCommand, String testCommand,
-                           boolean autoApprove) {
+                           boolean autoApprove, ApprovalStore approvalStore) {
         this.graph = graph;
         this.state = state;
         this.executors = executors;
@@ -140,6 +149,7 @@ public final class WorkflowEngine {
         this.buildCommand = buildCommand;
         this.testCommand = testCommand;
         this.autoApprove = autoApprove;
+        this.approvalStore = approvalStore;
         validateEveryGateAndExecutorIsResolvable();
     }
 
@@ -194,6 +204,7 @@ public final class WorkflowEngine {
 
             if (safeStopRequested) {
                 state.setWorkflowStatus(WorkflowStatus.SAFE_STOPPED);
+                persistStateIfConfigured();
                 return WorkflowStatus.SAFE_STOPPED;
             }
 
@@ -204,13 +215,71 @@ public final class WorkflowEngine {
                 WorkflowStatus outcome = decideOutcomeWithNothingToRun();
                 if (outcome != WorkflowStatus.RUNNING) {
                     state.setWorkflowStatus(outcome);
+                    persistStateIfConfigured();
                     return outcome;
                 }
+                persistStateIfConfigured();
                 continue;
             }
 
             executeWaveAndWaitForAll(runnableThisWave);
+            persistStateIfConfigured();
         }
+    }
+
+    /**
+     * Writes the run's complete state to {@code runs/<runId>/state.json} after every
+     * scheduling wave, and the approval history to {@code runs/<runId>/approvals.json}
+     * alongside it, so a run paused at AWAITING_APPROVAL (or stopped for any other
+     * reason) can be resumed in a fresh process from exactly where it left off, per
+     * spec 05. A run with no {@code runsDirectory} configured (most of spec 02's own
+     * unit tests) skips persistence entirely rather than failing, since those tests
+     * never intend to resume anything.
+     */
+    private void persistStateIfConfigured() {
+        if (runsDirectory == null) {
+            return;
+        }
+        Path statePath = runsDirectory.resolve(state.getRunId()).resolve("state.json");
+        try {
+            Files.createDirectories(statePath.getParent());
+            Files.writeString(statePath, state.toJsonString());
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to write " + statePath, e);
+        }
+        approvalStore.saveToFile(runsDirectory, state.getRunId());
+    }
+
+    /**
+     * Records a human approval for {@code nodeId} at the run's current requirement
+     * revision, then moves the node from WAITING_APPROVAL back to PENDING (the only
+     * legal exit from WAITING_APPROVAL that is not a denial, per the transition table),
+     * with an {@code APPROVAL_GRANTED} audit event carrying the approver and reason. The
+     * scheduler picks the now-PENDING node back up on {@link #run}'s next pass; this
+     * method does not itself run anything, matching D1's rule that approval and
+     * execution are never the same step.
+     */
+    public void approve(String nodeId, String approver, String reason) {
+        int currentRevision = state.getRequirementSpec().revision();
+        approvalStore.record(new ApprovalRecord(nodeId, currentRevision, ApprovalRecord.Decision.APPROVED,
+            approver, reason, java.time.Instant.now()));
+        state.record(AuditEvent.EventType.APPROVAL_GRANTED, nodeId, approver, reason,
+            Map.of("requirementRevision", (double) currentRevision));
+        state.transition(nodeId, NodeStatus.PENDING, approver, reason);
+        persistStateIfConfigured();
+    }
+
+    /**
+     * Records a human denial for {@code nodeId} at the run's current requirement
+     * revision, then moves the node from WAITING_APPROVAL to DENIED, a terminal status
+     * with no further legal transitions.
+     */
+    public void deny(String nodeId, String approver, String reason) {
+        int currentRevision = state.getRequirementSpec().revision();
+        approvalStore.record(new ApprovalRecord(nodeId, currentRevision, ApprovalRecord.Decision.DENIED,
+            approver, reason, java.time.Instant.now()));
+        state.transition(nodeId, NodeStatus.DENIED, approver, reason);
+        persistStateIfConfigured();
     }
 
     /**
@@ -258,7 +327,7 @@ public final class WorkflowEngine {
             }
 
             PolicyContext policyContext = new PolicyContext(targetServiceDirectory, runsDirectory,
-                state.getRunId(), autoApprove);
+                state.getRunId(), autoApprove, approvalStore);
             PolicyRule.Result result = policyEngine.evaluatePreExecutionWithReason(node, state, policyContext);
             switch (result.decision()) {
                 case DENY -> {

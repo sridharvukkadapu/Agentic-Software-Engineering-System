@@ -50,15 +50,21 @@ public final class RealPolicyEngine implements PolicyEngine {
 
     @Override
     public PolicyRule.Result evaluatePreExecutionWithReason(WorkflowNode node, WorkflowState state, PolicyContext context) {
-        if (config.isEnabled("critical-risk-requires-approval") && node.riskLevel() == RiskLevel.CRITICAL) {
+        int currentRevision = state.getRequirementSpec().revision();
+
+        if (config.isEnabled("critical-risk-requires-approval") && node.riskLevel() == RiskLevel.CRITICAL
+            && !context.hasValidApproval(node.id(), currentRevision)) {
             return PolicyRule.Result.requireApproval("critical-risk-requires-approval",
-                "node " + node.id() + " is CRITICAL risk and always requires human approval before execution");
+                "node " + node.id() + " is CRITICAL risk and always requires human approval before execution"
+                    + " (no valid approval recorded for requirement revision " + currentRevision + ")");
         }
 
-        if (config.isEnabled("high-risk-requires-approval") && node.riskLevel() == RiskLevel.HIGH && !context.autoApprove()) {
+        if (config.isEnabled("high-risk-requires-approval") && node.riskLevel() == RiskLevel.HIGH && !context.autoApprove()
+            && !context.hasValidApproval(node.id(), currentRevision)) {
             return PolicyRule.Result.requireApproval("high-risk-requires-approval",
                 "node " + node.id() + " is HIGH risk and requires human approval before execution"
-                    + " (not in --auto-approve mode)");
+                    + " (not in --auto-approve mode, no valid approval recorded for requirement revision "
+                    + currentRevision + ")");
         }
 
         if (config.isEnabled("evidence-before-release") && node.riskLevel() == RiskLevel.CRITICAL) {
