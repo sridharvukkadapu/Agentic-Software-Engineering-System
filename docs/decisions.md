@@ -121,3 +121,20 @@ gets closed by a specific later spec, named here so it does not have to be redis
   fixtures with genuine recordings without touching any executor code, since the seam
   between "a client that returns a response" and "where that response came from" is
   exactly what `AgentClient` exists to hide.
+
+- **TestExecutor's criterion-to-test mapping is containment, not regex extraction.**
+  The first version tried to regex-extract a criterion id directly out of a test method
+  name (`AC[A-Za-z0-9_]*`), greedily consuming the whole rest of the identifier (e.g.
+  parsing `testAC_99_RENAMED_ProvesGreetingWorks` as criterion id
+  `AC_99_RENAMED_ProvesGreetingWorks`, not `AC_99_RENAMED`), which is fundamentally
+  ambiguous: nothing distinguishes where an arbitrary criterion id ends and the
+  descriptive rest of the method name begins. Fixed by checking, for each criterion id
+  the requirement actually declares in this run, whether any real test method name
+  contains that exact identifier-safe string, rather than trying to parse an unknown-
+  length id out of freeform text. This is still fully derived rather than hardcoded
+  (AC-04-5's actual requirement): the set of ids checked against comes from
+  `context.get("acceptanceCriteria")` for this run, not a table baked into
+  `TestExecutor`, so a rename changes what is checked for automatically. Verified non-
+  vacuously by deliberately replacing the check with "assume every declared criterion
+  was found" and confirming `testACriterionWithNoMatchingTestMethodProducesNoEvidenceAndReportsFailure`
+  then fails, before restoring the real check.

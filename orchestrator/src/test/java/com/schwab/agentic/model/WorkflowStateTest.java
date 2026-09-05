@@ -95,6 +95,26 @@ public class WorkflowStateTest {
         assertEquals("claude-sonnet-4-6", event.details().get("model"), "details map must round trip");
     }
 
+    public void testNodeScopedRecordAttachesTheRealNodeId() {
+        WorkflowState state = new WorkflowState("RUN-1", TestFixtures.requirementSpec(),
+            List.of(TestFixtures.node("N1")));
+
+        state.record(AuditEvent.EventType.APPROVAL_GRANTED, "N1", "human:reviewer", "approved", Map.of());
+
+        AuditEvent event = state.getAuditLog().get(0);
+        assertEquals("N1", event.nodeId(), "the node-scoped record overload must attach the real node id");
+    }
+
+    public void testNodeScopedRecordRejectsANodeThatDoesNotBelongToThisState() {
+        WorkflowState state = new WorkflowState("RUN-1", TestFixtures.requirementSpec(),
+            List.of(TestFixtures.node("N1")));
+
+        assertThrows(IllegalArgumentException.class,
+            () -> state.record(AuditEvent.EventType.APPROVAL_GRANTED, "NOT-A-REAL-NODE", "human:reviewer",
+                "approved", Map.of()),
+            "the node-scoped record overload must reject a node id this state does not know about");
+    }
+
     public void testRecordDetailsCarryNestedListsAndMapsNotJustStrings() {
         WorkflowState state = new WorkflowState("RUN-1", TestFixtures.requirementSpec(),
             List.of(TestFixtures.node("N1"), TestFixtures.node("N2")));

@@ -124,12 +124,12 @@ public final class WorkflowState {
     }
 
     /**
-     * Records an audit event that is not a node status change: an agent call, a command
-     * execution, an artifact written to disk, a policy denial, an approval, a re-plan, or
-     * a resume. This, together with {@link #transition}, is the only way an
-     * {@link AuditEvent} can come into existence, since {@code AuditEvent}'s constructor
-     * is private to this package and this is the only other class in the package that
-     * builds one.
+     * Records a run-scoped audit event that is not a node status change: a re-plan or a
+     * resume, for instance, or any other event with no single node it belongs to. This,
+     * together with {@link #transition} and {@link #record(AuditEvent.EventType, String,
+     * String, String, Map)}, is the only way an {@link AuditEvent} can come into
+     * existence, since {@code AuditEvent}'s constructor is private to this package and
+     * these are the only other methods in the package that build one.
      */
     public synchronized void record(AuditEvent.EventType type, String actor, String reason,
                                      Map<String, Object> details) {
@@ -137,6 +137,30 @@ public final class WorkflowState {
             throw new IllegalArgumentException("Use transition() to record a STATUS_CHANGE event");
         }
         auditLog.add(newAuditEvent(null, type, null, null, actor, reason, details));
+    }
+
+    /**
+     * Records an audit event scoped to a specific node: an agent call, a command
+     * execution, an artifact written to disk, a policy denial, or an approval. Unlike the
+     * run-scoped {@link #record(AuditEvent.EventType, String, String, Map)}, this carries
+     * a real {@code nodeId}, which is what lets a later reader (spec 04's
+     * {@code ReleaseExecutor}, for instance) correlate a specific node's
+     * {@code WAITING_APPROVAL} status history with the specific {@code APPROVAL_GRANTED}
+     * event that resolved it, derived from the audit log rather than assumed.
+     */
+    public synchronized void record(AuditEvent.EventType type, String nodeId, String actor, String reason,
+                                     Map<String, Object> details) {
+        if (type == AuditEvent.EventType.STATUS_CHANGE) {
+            throw new IllegalArgumentException("Use transition() to record a STATUS_CHANGE event");
+        }
+        if (nodeId == null || nodeId.isBlank()) {
+            throw new IllegalArgumentException("record nodeId must not be blank; use the run-scoped overload"
+                + " for an event with no single node it belongs to");
+        }
+        if (!nodeDefinitions.containsKey(nodeId)) {
+            throw new IllegalArgumentException("Node " + nodeId + " does not belong to this WorkflowState");
+        }
+        auditLog.add(newAuditEvent(nodeId, type, null, null, actor, reason, details));
     }
 
     private AuditEvent newAuditEvent(String nodeId, AuditEvent.EventType type, NodeStatus from, NodeStatus to,
