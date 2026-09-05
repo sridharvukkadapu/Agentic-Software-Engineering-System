@@ -88,3 +88,19 @@ afterward, including the checkpoint hash verification and the per-node write-pat
 trade-off. It costs a few extra minutes per mechanism to run the "does this test fail if I
 break the thing it claims to test" experiment. Skipping that check is what let the weak
 version of this test through in the first place.
+
+## Open items
+
+Gaps identified during the build that are deliberately deferred, not forgotten. Each one
+gets closed by a specific later spec, named here so it does not have to be rediscovered.
+
+- **AC-03-8's repo-wide scan of `runs/`.** Spec 03 requires that the Anthropic API key
+  never appears in any audit event, log line, or artifact, and names a repo-wide scan of
+  `runs/` as how to check it. That scan cannot exist yet: no node has written a real
+  artifact to `runs/<runId>/` because no executor exists to do so (spec 04) and no run
+  has actually persisted its state to disk (spec 05). What spec 03 delivered instead is
+  the narrower, currently-checkable claim: `AnthropicClient`'s own exception path
+  redacts the key, verified against a real HTTP response from a local test server. Spec
+  05, once runs are actually persisting artifacts and state to `runs/`, is where the
+  full repo-wide scan this criterion describes becomes possible to write and should be
+  added.
