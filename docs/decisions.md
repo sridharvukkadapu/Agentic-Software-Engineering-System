@@ -104,3 +104,20 @@ gets closed by a specific later spec, named here so it does not have to be redis
   05, once runs are actually persisting artifacts and state to `runs/`, is where the
   full repo-wide scan this criterion describes becomes possible to write and should be
   added.
+
+- **Live fixtures for the node executors (spec 04) are not real recordings.** The
+  account behind `ANTHROPIC_API_KEY` in this environment has no credit balance
+  (confirmed directly against the API, not a code issue: every real call returns "Your
+  credit balance is too low to access the Anthropic API"), so spec 04's instruction to
+  record a real `--live` fixture per executor could not be carried out. Every executor's
+  fixture was instead produced by running the same `RecordingClient` a real `--live` run
+  would use, backed by a test-only `AgentClient` standing in for the network rather than
+  a genuine Anthropic response. This proves the record/replay mechanism and every
+  executor's parsing, gate, and artifact-writing logic exactly as a real fixture would,
+  since `RecordingClient` and `ReplayClient` do not know or care whether the response
+  they are given came from a real call. What it does not prove is that a real model
+  actually produces output in the shape these prompts expect. Once the account has
+  credit, re-running each scenario once with `--live` will overwrite these placeholder
+  fixtures with genuine recordings without touching any executor code, since the seam
+  between "a client that returns a response" and "where that response came from" is
+  exactly what `AgentClient` exists to hide.

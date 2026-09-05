@@ -1,5 +1,6 @@
 package com.schwab.agentic.engine;
 
+import com.schwab.agentic.json.Json;
 import com.schwab.agentic.model.AcceptanceCriterion;
 import com.schwab.agentic.model.Evidence;
 import com.schwab.agentic.model.NodeStatus;
@@ -33,6 +34,7 @@ public final class Gates {
         register("requirement-unambiguous-or-approved", new RequirementUnambiguousOrApprovedGate());
         register("checkpointing-configured", new CheckpointingConfiguredGate());
         register("artifact-written", new ArtifactWrittenGate());
+        register("requirement-complete", new RequirementCompleteGate());
         register("compiles", new CompilesGate());
         register("tests-pass", new TestsPassGate());
         register("evidence-complete", new EvidenceCompleteGate());
@@ -147,6 +149,76 @@ public final class Gates {
                 throw new UncheckedIOException("Failed to check artifact size: " + artifactPath, e);
             }
             return Result.pass("artifact exists and is non-empty: " + artifactPath);
+        }
+    }
+
+    /**
+     * The requirement executor's exit gate: the declared requirement-spec.json artifact
+     * exists, is non-empty, and parses with at least one acceptance criterion, AND no
+     * open-questions.json exists (or it exists but is an empty array). Reads both files
+     * from disk directly rather than trusting anything the agent claimed about itself,
+     * per the correction that an executor never decides its own success.
+     *
+     * open-questions.json is how RequirementExecutor reports a genuine gap: something
+     * the design needs an answer to that the requirement text simply does not specify,
+     * as opposed to an ambiguity the requirement itself flags (which goes in
+     * requirement-spec.json's ambiguities list and is a different, resolvable, concern
+     * handled by requirement-unambiguous-or-approved). A non-empty open-questions.json
+     * means the requirement executor recognized a gap it is not the agent's place to
+     * fill by inventing a policy, so this gate fails deterministically and the run
+     * safe-stops rather than letting an invented assumption flow downstream unchecked.
+     */
+    private static final class RequirementCompleteGate implements Gate {
+        @Override
+        @SuppressWarnings("unchecked")
+        public Result evaluate(WorkflowNode node, WorkflowState state, GateContext context) {
+            Object artifactPathValue = context.executorOutputs().get("artifactPath");
+            if (!(artifactPathValue instanceof String artifactPathString) || artifactPathString.isBlank()) {
+                return Result.fail("executor did not report an artifactPath in its output");
+            }
+            Path requirementSpecPath = Path.of(artifactPathString);
+            if (!Files.isRegularFile(requirementSpecPath)) {
+                return Result.fail("declared requirement-spec.json does not exist: " + requirementSpecPath);
+            }
+
+            Map<String, Object> parsed;
+            try {
+                String content = Files.readString(requirementSpecPath);
+                if (content.isBlank()) {
+                    return Result.fail("requirement-spec.json is empty: " + requirementSpecPath);
+                }
+                parsed = (Map<String, Object>) Json.parse(content);
+            } catch (IOException e) {
+                throw new UncheckedIOException("Failed to read requirement-spec.json: " + requirementSpecPath, e);
+            }
+
+            List<Object> acceptanceCriteria = (List<Object>) parsed.getOrDefault("acceptanceCriteria", List.of());
+            if (acceptanceCriteria.isEmpty()) {
+                return Result.fail("requirement-spec.json parsed with zero acceptance criteria: " + requirementSpecPath);
+            }
+
+            Object openQuestionsPathValue = context.executorOutputs().get("openQuestionsPath");
+            if (openQuestionsPathValue instanceof String openQuestionsPathString && !openQuestionsPathString.isBlank()) {
+                Path openQuestionsPath = Path.of(openQuestionsPathString);
+                if (Files.isRegularFile(openQuestionsPath)) {
+                    List<Object> openQuestions;
+                    try {
+                        String content = Files.readString(openQuestionsPath);
+                        Object parsedQuestions = content.isBlank() ? List.of() : Json.parse(content);
+                        openQuestions = parsedQuestions instanceof List ? (List<Object>) parsedQuestions : List.of();
+                    } catch (IOException e) {
+                        throw new UncheckedIOException("Failed to read open-questions.json: " + openQuestionsPath, e);
+                    }
+                    if (!openQuestions.isEmpty()) {
+                        return Result.fail("open-questions.json declares " + openQuestions.size()
+                            + " unresolved question(s) the requirement does not answer: " + openQuestionsPath
+                            + ". The requirement executor does not invent a policy to fill this gap.");
+                    }
+                }
+            }
+
+            return Result.pass("requirement-spec.json parsed with " + acceptanceCriteria.size()
+                + " acceptance criteria and no unresolved open questions");
         }
     }
 
