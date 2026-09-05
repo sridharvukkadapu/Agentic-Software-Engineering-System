@@ -4,7 +4,6 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 
@@ -27,6 +26,16 @@ import java.util.List;
  * starts with {@code test}. Methods are sorted by name before running: reflection does
  * not guarantee declaration order, and an unordered run is not reproducible between two
  * invocations on the same machine, let alone between machines.
+ *
+ * A test has three possible outcomes, not two. Throwing {@link SkippedException} reports
+ * that a test could not run in this environment (for example, a live-API test with no
+ * key exported), distinct from passing. A test that silently returns without asserting
+ * anything when its precondition is missing is indistinguishable, in the summary count,
+ * from a test that genuinely ran and found nothing wrong, and that is exactly the canned
+ * success this project treats as disqualifying everywhere else. A skipped test never
+ * counts toward the passed count or the attempted count in {@code PASSED n/m}; it is
+ * reported separately as {@code SKIPPED k}, so a reviewer scanning the summary line sees
+ * at a glance how much of the suite actually ran versus how much declined to.
  */
 public final class TestRunner {
 
@@ -43,20 +52,31 @@ public final class TestRunner {
         }
 
         int passed = 0;
+        int skipped = 0;
+        int attempted = 0;
         for (TestResult result : results) {
-            if (result.passed) {
-                passed++;
-                System.out.println("PASS  " + result.testName);
-            } else {
-                System.out.println("FAIL  " + result.testName);
-                System.out.println("      " + result.failureMessage);
+            switch (result.outcome) {
+                case PASS -> {
+                    passed++;
+                    attempted++;
+                    System.out.println("PASS  " + result.testName);
+                }
+                case FAIL -> {
+                    attempted++;
+                    System.out.println("FAIL  " + result.testName);
+                    System.out.println("      " + result.detail);
+                }
+                case SKIP -> {
+                    skipped++;
+                    System.out.println("SKIP  " + result.testName + " (" + result.detail + ")");
+                }
             }
         }
 
         System.out.println();
-        System.out.println("PASSED " + passed + "/" + results.size());
+        System.out.println("PASSED " + passed + "/" + attempted + ", SKIPPED " + skipped);
 
-        if (passed < results.size()) {
+        if (passed < attempted) {
             System.exit(1);
         }
     }
@@ -79,7 +99,11 @@ public final class TestRunner {
                 results.add(TestResult.pass(testName));
             } catch (InvocationTargetException e) {
                 Throwable cause = e.getCause();
-                results.add(TestResult.fail(testName, describeFailure(cause)));
+                if (cause instanceof SkippedException skipped) {
+                    results.add(TestResult.skip(testName, skipped.getMessage()));
+                } else {
+                    results.add(TestResult.fail(testName, describeFailure(cause)));
+                }
             } catch (Exception e) {
                 results.add(TestResult.fail(testName, describeFailure(e)));
             }
@@ -104,13 +128,21 @@ public final class TestRunner {
         return message.toString();
     }
 
-    private record TestResult(String testName, boolean passed, String failureMessage) {
+    private enum Outcome {
+        PASS, FAIL, SKIP
+    }
+
+    private record TestResult(String testName, Outcome outcome, String detail) {
         static TestResult pass(String testName) {
-            return new TestResult(testName, true, null);
+            return new TestResult(testName, Outcome.PASS, null);
         }
 
         static TestResult fail(String testName, String failureMessage) {
-            return new TestResult(testName, false, failureMessage);
+            return new TestResult(testName, Outcome.FAIL, failureMessage);
+        }
+
+        static TestResult skip(String testName, String reason) {
+            return new TestResult(testName, Outcome.SKIP, reason);
         }
     }
 }

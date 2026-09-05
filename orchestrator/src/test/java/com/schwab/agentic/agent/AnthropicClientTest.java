@@ -5,16 +5,18 @@ import static com.schwab.agentic.Assertions.assertFalse;
 import static com.schwab.agentic.Assertions.assertThrows;
 import static com.schwab.agentic.Assertions.assertTrue;
 
+import com.schwab.agentic.SkippedException;
 import java.util.List;
 import java.util.Map;
 
 /**
  * Covers {@link AnthropicClient}: text extraction across multiple content blocks
  * (AC-03-6), API key redaction (AC-03-8), and the required live-API test (AC-03-1),
- * which checks {@code ANTHROPIC_API_KEY} itself and passes trivially (no assertion made)
- * when the key is absent, since the hand-rolled TestRunner has no separate "skipped"
- * status. When the key is present, this is the one test in the whole suite that makes a
- * real network call.
+ * which checks {@code ANTHROPIC_API_KEY} itself and throws {@link SkippedException}
+ * when the key is absent, rather than returning without asserting anything: a test that
+ * passes by doing nothing is indistinguishable from a test that ran and found nothing
+ * wrong, which is the exact failure mode this whole build exists to avoid. When the key
+ * is present, this is the one test in the whole suite that makes a real network call.
  */
 public class AnthropicClientTest {
 
@@ -46,14 +48,16 @@ public class AnthropicClientTest {
     }
 
     /**
-     * Required test (AC-03-1): a live call against the real API returns text. Skipped
-     * automatically (passes trivially) when ANTHROPIC_API_KEY is not set, since this
-     * suite must run with zero network access and no key by default (CLAUDE.md).
+     * Required test (AC-03-1): a live call against the real API returns text. Throws
+     * {@link SkippedException} when ANTHROPIC_API_KEY is not set, since this suite must
+     * run with zero network access and no key by default (CLAUDE.md), but a test that
+     * silently returns instead of skipping would count as a pass without ever having
+     * exercised anything.
      */
     public void testLiveCallAgainstTheRealApiReturnsText() {
         String apiKey = System.getenv("ANTHROPIC_API_KEY");
         if (apiKey == null || apiKey.isBlank()) {
-            return;
+            throw new SkippedException("ANTHROPIC_API_KEY is not set");
         }
 
         AnthropicClient client = new AnthropicClient(apiKey);
