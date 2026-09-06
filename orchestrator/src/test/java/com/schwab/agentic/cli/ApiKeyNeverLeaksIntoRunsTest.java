@@ -69,7 +69,7 @@ public class ApiKeyNeverLeaksIntoRunsTest {
             System.getProperty("java.home") + "/bin/java", "-cp", CLASSPATH.toString(),
             "com.schwab.agentic.cli.Main", "run",
             "--workflow", "workflows/approval-demo.json",
-            "--requirement", "scenarios/greenfield/requirement.md",
+            "--requirement", "scenarios/_smoke/requirement.md",
             "--live", "--run-id", runId,
             "--runs", runsDirectory.toString(),
             "--fixtures", fixturesDirectory.toString());

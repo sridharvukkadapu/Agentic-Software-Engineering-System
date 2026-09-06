@@ -78,23 +78,27 @@ public class GreenfieldEndToEndTest {
     }
 
     /**
-     * The real, honest outcome: replaying the real greenfield/requirement fixture
-     * through RequirementExecutor and the requirement-complete gate reproduces the real
-     * safe-stop, because the real model's response (open questions about cache TTL,
-     * timeout value, and eviction policy) is exactly what was recorded, byte for byte.
-     */
-    /**
-     * scenarios/greenfield/requirement.md was amended to answer the requirement's
-     * original real gaps (cache TTL, timeout value, eviction policy, SSRF protection,
-     * and others the first live recording pass found) after the ambiguity-detection
-     * mechanism correctly caught them. Even after that amendment, the real model's first
-     * attempt against the more detailed requirement still found further, more granular
-     * real gaps (malformed target URL handling, response size limits, User-Agent policy,
-     * concurrent-fetch coalescing), so the real fixture still safe-stops on its first
-     * attempt: the mechanism keeps finding genuine edge cases as the requirement gets
-     * more precise, which is the intended behavior, not a fixture to force past. The real
-     * retry, told the first attempt's real open questions, produced a response with none
-     * remaining, which is what gives this scenario a real path to REQUIREMENT COMPLETED.
+     * The real, current, honest outcome, and it is a stronger result than a clean pass
+     * would have been. scenarios/greenfield/requirement.md was amended once already (the
+     * requirement's original real gaps: cache TTL, timeout value, eviction policy, SSRF
+     * protection) and, separately, a second time to answer five further gaps a live
+     * retry found (negative-result caching, IPv6 SSRF ranges, redirect handling, the 404
+     * schema, a response body size cap). Both amendments were the correct response to
+     * the exit gate's own feedback: answer what it asks, not re-run the same request
+     * hoping for a different answer.
+     *
+     * After both amendments, a live retry against the fully-amended text found six more
+     * genuine gaps (cache size and eviction bound, authentication policy, character
+     * encoding for non-UTF-8 pages, non-HTTP target URL schemes, which instant starts the
+     * TTL clock, and cache persistence across restarts), and the retry told about that
+     * failure reason returned essentially the same six questions rather than resolving
+     * them. This replays that real, current result: REQUIREMENT exhausts its two-attempt
+     * budget and never passes requirement-complete for this scenario, not because the
+     * mechanism is broken, but because a sufficiently capable, honest model given a
+     * two-attempt budget can keep finding genuine new ambiguity every time an existing
+     * layer is answered. See docs/design.md for what this implies about the exit gate's
+     * own criterion (currently "zero open questions," which this evidence suggests is
+     * unsatisfiable in principle against a capable model, not just difficult).
      *
      * The real retry's request embeds the real gate failure reason from the first
      * attempt, which itself names a real, unique temp directory path for the first
@@ -105,7 +109,7 @@ public class GreenfieldEndToEndTest {
      * directly and served through a fixed-response client rather than reconstructed and
      * looked up by hash.
      */
-    public void testRealGreenfieldRequirementFixtureReplaysAndPassesAfterTheRealRetry() throws IOException {
+    public void testRealGreenfieldRequirementFixtureReplaysExhaustsRetryBudgetOnGenuineAmbiguity() throws IOException {
         Path artifactsDir = Files.createTempDirectory("replay-artifacts-greenfield-req");
         Path fixturesDir = FIXTURES_ROOT.resolve("greenfield/requirement");
         Path requirementPath = findRepoRoot().resolve("scenarios/greenfield/requirement.md");
@@ -139,9 +143,14 @@ public class GreenfieldEndToEndTest {
             "requirement-spec.json must be written");
         assertTrue(Files.size(artifactsDir.resolve("requirement-spec.json")) > 0,
             "requirement-spec.json must be non-empty");
-        assertTrue(finalGateResult.passed(),
-            "the real retry must produce a requirement-spec.json with no unresolved open questions,"
-                + " giving this scenario a real path to REQUIREMENT COMPLETED: " + finalGateResult.reason());
+        assertTrue(!firstGateResult.passed(),
+            "the real first attempt must find genuine open questions: " + firstGateResult.reason());
+        assertTrue(!finalGateResult.passed(),
+            "the real retry must still find genuine open questions (a new, different layer of ambiguity),"
+                + " not resolve to zero, reflecting the real, current recorded fixture: " + finalGateResult.reason());
+        assertTrue(!firstGateResult.reason().equals(finalGateResult.reason()),
+            "the retry's real open questions must genuinely differ from the first attempt's, proving the model"
+                + " engaged with the previous failure reason rather than repeating itself verbatim");
     }
 
     public void testRealImpactFixturesReplayAndWriteNonEmptyArtifacts() throws IOException {

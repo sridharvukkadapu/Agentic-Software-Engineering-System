@@ -22,11 +22,15 @@ a clear message if it finds an older JDK.
 **1. Smoke test.** Proves the build, the scheduler, entry/exit gates, the audit log, and
 real artifact writing all work from a clean clone, no key, no network. This is a
 two-node graph (REQUIREMENT then DOCUMENT), not the governance graph, stated here
-plainly: it exists to prove the machine runs, not to demonstrate governance depth.
+plainly: it exists to prove the machine runs, not to demonstrate governance depth. It
+runs against `scenarios/_smoke/requirement.md`, a stable requirement dedicated to this
+test, deliberately not one of the three named scenarios below: this is what keeps the
+smoke test itself immune to a scenario's requirement text being amended, exactly the
+kind of edit the ambiguous and greenfield scenarios genuinely need over time.
 
 ```bash
 git clone <repo> && cd Agentic-Software-Engineering-System
-./scripts/run.sh greenfield --replay --auto-approve --run-id DEMO-SMOKE \
+./scripts/run.sh _smoke --replay --auto-approve --run-id DEMO-SMOKE \
   --workflow "$(pwd)/workflows/approval-demo.json"
 cat runs/DEMO-SMOKE/state.json
 ```

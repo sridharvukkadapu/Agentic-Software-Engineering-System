@@ -65,7 +65,7 @@ public class MainCliResumeTest {
         // into what comes next. ---
         ProcessResult runResult = runMainAsASeparateProcess(repoRoot, runsDirectory, "run",
             "--workflow", "workflows/approval-demo.json",
-            "--requirement", "scenarios/greenfield/requirement.md",
+            "--requirement", "scenarios/_smoke/requirement.md",
             "--replay", "--run-id", runId, "--fixtures", "fixtures");
         assertEquals(0, runResult.exitCode(), "run must exit 0: " + runResult.combinedOutput());
         assertTrue(runResult.combinedOutput().contains("AWAITING_APPROVAL"),
