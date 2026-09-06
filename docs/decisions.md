@@ -461,3 +461,43 @@ revision 2), and after a fresh `approve` and `resume` the run reaches COMPLETED 
 Each of `Replanner`'s three real mechanisms (the COMPLETED-only invalidation filter,
 evidence revocation, and checkpoint archival) was verified non-vacuously: deliberately
 removed in isolation, confirmed to break exactly its own test and no other, then restored.
+
+## D9. A real model hallucinated dependencies that do not exist in the target project
+
+**Problem.** Running the full eight-node pipeline for real, for the first time, sent
+`ImplementExecutor`'s prompt to a real model with a design spec calling for an in-process
+cache and HTML title/description extraction. The model's first live response imported
+`com.github.benmanes.caffeine.cache.Caffeine`, `org.jsoup.Jsoup`, and a Redis-backed cache
+class, none of which exist anywhere in `target-service`'s real dependency graph
+(`target-service/build.gradle.kts` declares only Spring Boot web, data-jpa, validation,
+and Flyway). The real `compileJava` gate failed with a real, unremarkable
+`cannot find symbol` error for each one.
+
+**Decision.** The prompt was the defect, not the model: nothing in `ImplementExecutor`'s
+system prompt ever told it what was and was not actually on the compile classpath, so a
+plausible, idiomatic Java engineer's choice (a proper HTML parser and a real cache
+library, rather than hand-rolling both) was indistinguishable, from the prompt's own
+information, from a genuinely available dependency. Fixed by stating the real declared
+dependencies explicitly in the system prompt and naming the specific libraries that are
+*not* available (Caffeine, Jsoup, Guava, Apache Commons, Redis and spring-data-redis),
+instructing the model to implement the equivalent capability directly with the JDK
+standard library and Spring's own facilities when one of those would normally be reached
+for. The same real gap also caused a second, related failure: the model guessed at the
+package of `UrlService`, a real, pre-existing class its own design needed to call, since
+nothing in its context showed the real class. Fixed by threading `impact.json`'s real
+`affectedFiles` list, and the real content of each file on it, into the prompt as
+`existingCodeContext`.
+
+**Why this belongs in this document.** This project's one design principle is "agents
+propose, deterministic code decides," and CLAUDE.md rule 2 treats a hardcoded or
+mocked-out agent response as disqualifying. A model that only ever sees fixtures crafted
+by hand cannot produce this failure: a test author writing a canned response has no
+reason to reach for a plausible-sounding library that happens not to be declared, because
+the author already knows what compiles. A real model, reasoning genuinely about a real
+but incomplete prompt, does exactly this: it fills the gap with the most idiomatic real
+answer it knows, which is sometimes wrong given a context it was never shown. Both
+`compileJava` failures here are that story end to end: a real request, a real response, a
+real compiler catching a real mismatch between what the model assumed and what the target
+actually has, and a real prompt fix (not a fixture edit, not a gate exception) closing the
+gap. This is the single clearest piece of evidence in the whole build that the agent layer
+is genuinely calling a live model rather than standing in a rehearsed answer.
