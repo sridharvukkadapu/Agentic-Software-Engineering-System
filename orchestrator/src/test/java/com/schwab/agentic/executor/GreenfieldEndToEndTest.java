@@ -124,7 +124,7 @@ public class GreenfieldEndToEndTest {
         NodeExecutor.ExecutionOutput finalOutput = firstAttempt;
         Gate.Result finalGateResult = firstGateResult;
         if (!firstGateResult.passed()) {
-            String retryResponseText = latestRecordedResponseText(fixturesDir);
+            String retryResponseText = retryRecordedResponseText(fixturesDir);
             com.schwab.agentic.agent.AgentClient fixedResponseClient = request -> new com.schwab.agentic.agent.AgentResponse(
                 retryResponseText, 0, 0, 0, com.schwab.agentic.agent.Mode.REPLAY, "test-only-retry-reconstruction");
             RequirementExecutor retryExecutor = new RequirementExecutor(fixedResponseClient, artifactsDir);
@@ -216,7 +216,7 @@ public class GreenfieldEndToEndTest {
      * path than the one baked into the original recording's retry request, so the retry
      * request can never hash to the same fixture file across separate JVM runs. Instead
      * the retry fixture's already-recorded response text is served directly, which is
-     * what {@link #latestRecordedResponseText} does; only the outcome (does this real
+     * what {@link #retryRecordedResponseText} does; only the outcome (does this real
      * text compile) is being verified here, not a byte-exact replay of the retry call.
      */
     private ImplementReplayResult replayImplementWithRetry() throws IOException {
@@ -234,7 +234,7 @@ public class GreenfieldEndToEndTest {
             "./gradlew compileJava", implementTargetDir, java.time.Duration.ofMinutes(3));
 
         if (!buildResult.succeeded()) {
-            String retryResponseText = latestRecordedResponseText(fixturesDir);
+            String retryResponseText = retryRecordedResponseText(fixturesDir);
             com.schwab.agentic.agent.AgentClient fixedResponseClient = request -> new com.schwab.agentic.agent.AgentResponse(
                 retryResponseText, 0, 0, 0, com.schwab.agentic.agent.Mode.REPLAY, "test-only-retry-reconstruction");
             ImplementExecutor retryExecutor = new ImplementExecutor(fixedResponseClient, implementTargetDir, artifactsDir);
@@ -245,19 +245,74 @@ public class GreenfieldEndToEndTest {
         return new ImplementReplayResult(output, artifactsDir, implementTargetDir);
     }
 
-    /** The response text from the most recently written fixture file under {@code directory}, by file modification time. */
-    private String latestRecordedResponseText(Path directory) throws IOException {
-        Path latestFile;
+    /**
+     * The response text of the recorded <em>retry</em> fixture under {@code directory}:
+     * the one whose recorded request carries the previous attempt's failure reason, which
+     * is what definitionally makes a request a retry. Every executor that supports retries
+     * injects that reason with the literal phrase "previous attempt"
+     * ({@code RequirementExecutor}, {@code ImplementExecutor}, {@code TestExecutor},
+     * {@code ImpactExecutor} and {@code DesignExecutor} all do), so a request containing it
+     * is a retry request and one without it is a first attempt.
+     *
+     * This deliberately does not select by file modification time, which is what an earlier
+     * version did. Git does not preserve mtimes, and the two fixtures in a stage directory
+     * were recorded milliseconds apart, so on any fresh clone the checkout order decided
+     * which fixture "the latest" meant. That made this test pass on the machine that
+     * recorded the fixtures and fail for everyone who cloned the repo, which is the exact
+     * failure mode {@code --replay} exists to prevent: an evaluator with no API key must
+     * get the same result as the author. Selecting on recorded request content is stable
+     * across clones because the content is the committed data itself.
+     */
+    private String retryRecordedResponseText(Path directory) throws IOException {
+        List<Path> fixtureFiles;
         try (var walk = Files.walk(directory)) {
-            latestFile = walk.filter(Files::isRegularFile)
-                .max(java.util.Comparator.comparingLong(path -> path.toFile().lastModified()))
-                .orElseThrow(() -> new IllegalStateException("No fixture files found under " + directory));
+            fixtureFiles = walk.filter(Files::isRegularFile).sorted().toList();
         }
+        if (fixtureFiles.isEmpty()) {
+            throw new IllegalStateException("No fixture files found under " + directory);
+        }
+
+        List<Path> retryFixtures = new ArrayList<>();
+        for (Path fixtureFile : fixtureFiles) {
+            if (recordedRequestText(fixtureFile).toLowerCase(java.util.Locale.ROOT).contains("previous attempt")) {
+                retryFixtures.add(fixtureFile);
+            }
+        }
+
+        Path selected;
+        if (retryFixtures.size() == 1) {
+            selected = retryFixtures.get(0);
+        } else if (retryFixtures.isEmpty() && fixtureFiles.size() == 1) {
+            // This stage recorded only one response and none of it carries retry context,
+            // so there is exactly one response the caller can be given and no choice to get
+            // wrong. fixtures/greenfield/test is currently in this state: it holds a single
+            // first-attempt recording, left over from the targeted --only-test re-recording
+            // documented in decisions.md, even though the test calling this reads as though
+            // a separate retry recording existed. Returning the sole recording preserves
+            // exactly what the previous mtime-based selection did here (with one file, the
+            // "most recent" file was always that file), so this fix changes no outcome; it
+            // only removes the dependence on mtimes that git does not preserve.
+            selected = fixtureFiles.get(0);
+        } else {
+            throw new IllegalStateException("Cannot deterministically choose a recorded response under " + directory
+                + ": found " + retryFixtures.size() + " fixture(s) carrying retry context out of "
+                + fixtureFiles.size() + " total. Expected either exactly one retry fixture, or a single"
+                + " recording with no retry context.");
+        }
+
         @SuppressWarnings("unchecked")
-        Map<String, Object> fixture = (Map<String, Object>) com.schwab.agentic.json.Json.parse(Files.readString(latestFile));
+        Map<String, Object> fixture =
+            (Map<String, Object>) com.schwab.agentic.json.Json.parse(Files.readString(selected));
         @SuppressWarnings("unchecked")
         Map<String, Object> response = (Map<String, Object>) fixture.get("response");
         return (String) response.get("text");
+    }
+
+    /** The full recorded request of a fixture, serialized back to text so it can be searched for retry markers. */
+    private String recordedRequestText(Path fixtureFile) throws IOException {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> fixture = (Map<String, Object>) com.schwab.agentic.json.Json.parse(Files.readString(fixtureFile));
+        return com.schwab.agentic.json.Json.write(fixture.get("request"));
     }
 
     private record ImplementReplayResult(NodeExecutor.ExecutionOutput finalOutput, Path artifactsDir,
@@ -396,7 +451,7 @@ public class GreenfieldEndToEndTest {
 
         NodeExecutor.ExecutionOutput requirementOutput = requirementFirst;
         if (!requirementGateResult.passed()) {
-            String retryText = latestRecordedResponseText(requirementFixturesDir);
+            String retryText = retryRecordedResponseText(requirementFixturesDir);
             var fixedClient = fixedResponseClient(retryText);
             RequirementExecutor retryExecutor = new RequirementExecutor(fixedClient, artifactsDir);
             requirementOutput = retryExecutor.execute(requirementNode, Map.of(
@@ -555,7 +610,7 @@ public class GreenfieldEndToEndTest {
             "./gradlew compileJava", implementTargetDir, java.time.Duration.ofMinutes(3));
 
         if (!buildResult.succeeded()) {
-            String retryResponseText = latestRecordedResponseText(fixturesDir);
+            String retryResponseText = retryRecordedResponseText(fixturesDir);
             var fixedResponseClient = fixedResponseClient(retryResponseText);
             ImplementExecutor retryExecutor = new ImplementExecutor(fixedResponseClient, implementTargetDir, artifactsDir);
             output = retryExecutor.execute(node, Map.of("designSpec", realDesignSpec,

@@ -2,6 +2,7 @@ package com.schwab.agentic.cli;
 
 import com.schwab.agentic.agent.AgentClient;
 import com.schwab.agentic.agent.AgentClientFactory;
+import com.schwab.agentic.artifact.RunReport;
 import com.schwab.agentic.engine.ApprovalStore;
 import com.schwab.agentic.engine.CommandRunner;
 import com.schwab.agentic.engine.Checkpoint;
@@ -37,9 +38,11 @@ import java.util.Map;
 /**
  * The orchestrator's command-line entry point: {@code run}, {@code resume},
  * {@code approve}, and {@code amend} are real, wired to the real executor registry (all
- * eight spec-04 executors, not a subset) and a real {@link WorkflowEngine}. {@code report}
- * (spec 08's reporting) is declared as a named subcommand so the CLI surface exists, but
- * prints that it is not yet implemented rather than faking a result.
+ * eight spec-04 executors, not a subset) and a real {@link WorkflowEngine}.
+ * {@code report} renders spec 08's {@link RunReport} from a run's persisted
+ * {@code state.json}, recomputed from the audit log on every invocation, so it can be
+ * pointed at any already-finished run (including a committed demo run) without needing
+ * the process that produced it.
  *
  * {@code buildEngine} registers every node id {@code sdlc-default.json} declares:
  * requirement, impact, design, implement, test, document, validate, release. A workflow
@@ -76,7 +79,7 @@ public final class Main {
                 case "resume" -> resumeCommand(args);
                 case "approve" -> approveCommand(args);
                 case "amend" -> amendCommand(args);
-                case "report" -> System.out.println("report is spec 08's reporting; not yet implemented.");
+                case "report" -> reportCommand(args);
                 default -> {
                     System.err.println("Unknown command: " + command);
                     printUsageAndExit();
@@ -95,7 +98,7 @@ public final class Main {
               resume --run-id <id> [--workflow <path>] [--live | --replay] [--fixtures <dir>] [--runs <dir>] [--target-service <path>] [--build-command <cmd>] [--test-command <cmd>]
               approve --run-id <id> <nodeId> --by "<name>" --reason "<text>" [--runs <dir>]
               amend --run-id <id> --requirement <file> [--workflow <path>] [--target-service <path>] [--runs <dir>] [--fixtures <dir>]
-              report: not yet implemented (spec 08)
+              report --run-id <id> [--runs <dir>] [--out <path>]
             """);
         System.exit(2);
     }
@@ -300,6 +303,49 @@ public final class Main {
     }
 
     // ---- resume ----
+
+    /**
+     * Renders spec 08's {@link RunReport} for an already-persisted run: metrics, the
+     * workflow graph with each node's real final status, and the traceability matrix, all
+     * recomputed from {@code runs/<runId>/state.json} on every invocation rather than read
+     * from anything a run accumulated while executing. That is what makes this safe to
+     * point at a run some other process produced, including a committed demo run: the
+     * report is a pure function of the persisted audit log, so it cannot disagree with it.
+     *
+     * Writes to {@code runs/<runId>/report.md} by default (or {@code --out}), and also
+     * prints to stdout so a reviewer piping this command sees the result without opening
+     * a file.
+     */
+    private static void reportCommand(String[] args) {
+        CliArgs cliArgs = CliArgs.parse(args);
+        String runId = cliArgs.requireValue("--run-id");
+        Path runsDirectory = cliArgs.pathOrDefault("--runs", Path.of("runs"));
+
+        Path statePath = runsDirectory.resolve(runId).resolve("state.json");
+        if (!Files.isRegularFile(statePath)) {
+            throw new IllegalArgumentException("No state.json found for run " + runId + " at " + statePath);
+        }
+        String stateJson;
+        try {
+            stateJson = Files.readString(statePath);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to read " + statePath, e);
+        }
+
+        WorkflowState state = WorkflowState.fromJsonString(stateJson);
+        String report = new RunReport(state).render();
+
+        Path outputPath = cliArgs.pathOrDefault("--out", runsDirectory.resolve(runId).resolve("report.md"));
+        try {
+            Files.createDirectories(outputPath.getParent());
+            Files.writeString(outputPath, report);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to write " + outputPath, e);
+        }
+
+        System.out.println(report);
+        System.out.println("Report written to " + outputPath);
+    }
 
     private static void resumeCommand(String[] args) {
         CliArgs cliArgs = CliArgs.parse(args);

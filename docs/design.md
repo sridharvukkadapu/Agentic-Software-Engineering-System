@@ -193,6 +193,33 @@ scenario's real text would desynchronize them from DOCUMENT's recorded response.
 Verified via `MainCliResumeTest` (unaffected, still passing) and the full suite
 (159/166, identical failure set to before the fix, described below).
 
+### 3.1a A test selected a fixture by file modification time, so the suite was not reproducible from a clone (found and fixed)
+
+`GreenfieldEndToEndTest` needs the response a recorded *retry* produced. It used to find
+that by taking the most recently modified file in the stage's fixture directory. Git does
+not preserve modification times, and the two fixtures in a directory were recorded
+milliseconds apart (0.0007s, in the greenfield requirement stage), so on any fresh clone
+the checkout order decided which fixture "the latest" meant. The result: the suite scored
+159/166 on the machine that recorded the fixtures and 158/166 on a fresh clone, with
+`testRealGreenfieldRequirementFixtureReplaysAndPassesAfterTheRealRetry` failing only for
+people who cloned the repo. That is precisely the failure mode `--replay` exists to
+prevent, and it also meant the failure list published in section 3.2 below was not the
+list a reviewer would actually see.
+
+**Fix.** Select the retry fixture by recorded request content: a retry request is the one
+carrying the previous attempt's failure reason, which every retry-capable executor injects
+with the literal phrase "previous attempt". That is committed data, so it is identical on
+every clone. Where a stage recorded only one response and none of it carries retry context
+(`fixtures/greenfield/test` is in this state, a leftover of the targeted `--only-test`
+re-recording in D6), the single recording is returned, which is exactly what the old code
+did there; anything genuinely ambiguous now throws rather than picking silently.
+
+**Verified non-vacuously**, per this project's usual discipline: fixture mtimes were
+inverted so the first attempt became the newest file in every two-fixture directory. The
+old code scored 158/166 with exactly the fresh-clone failure reproduced; the new code
+scores 159/166, matching a normal local run. The fix is therefore demonstrably
+independent of mtimes rather than merely believed to be.
+
 ### 3.2 Fixtures are replay-by-default; live re-recording is real, but currently blocked by both credit and a code-shape change
 
 Live mode is fully implemented and was used for real at least once: `docs/decisions.md`'s

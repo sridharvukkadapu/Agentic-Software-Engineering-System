@@ -1,2 +1,7 @@
 runs/
 orchestrator/out/
+target-service/build/
+target-service/.gradle/
+.vscode/
+.idea/
+.DS_Store
