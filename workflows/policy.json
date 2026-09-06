@@ -53,6 +53,12 @@
       "dependencyManifestFilenames": ["pom.xml", "build.gradle", "build.gradle.kts"]
     },
     {
+      "name": "evidence-coverage",
+      "category": "compliance",
+      "enabled": true,
+      "description": "Denies the RELEASE node's admission when any acceptance criterion has zero associated Evidence records at all (never attempted, not merely failed)."
+    },
+    {
       "name": "evidence-before-release",
       "category": "compliance",
       "enabled": true,

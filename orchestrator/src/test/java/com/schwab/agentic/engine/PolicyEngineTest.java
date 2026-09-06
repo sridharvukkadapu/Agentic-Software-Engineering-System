@@ -18,11 +18,13 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Covers all eight of {@link RealPolicyEngine}'s rules (AC-05-4): one test per rule that
+ * Covers all nine of {@link RealPolicyEngine}'s rules (AC-05-4): one test per rule that
  * constructs an input specifically crafted to trip its DENY or REQUIRE_APPROVAL branch.
  * A rule with no such test is assumed dead under CLAUDE.md rule 6; every test here proves
  * the opposite for its rule by actually reaching the restrictive branch, not merely by
- * exercising the rule's ALLOW path.
+ * exercising the rule's ALLOW path. (Nine, not eight: {@code evidence-coverage} was added
+ * after {@code audit-completeness} was dropped as unreachable, restoring compliance to
+ * two rules; see docs/decisions.md.)
  */
 public class PolicyEngineTest {
 
@@ -36,6 +38,7 @@ public class PolicyEngineTest {
             {"name": "write-paths-contract", "category": "security", "enabled": true},
             {"name": "no-secrets-in-diff", "category": "security", "enabled": true, "patterns": ["sk-ant-api[0-9]{2}-[A-Za-z0-9_-]{20,}", "AKIA[0-9A-Z]{16}"]},
             {"name": "no-dependency-additions", "category": "security", "enabled": true, "dependencyManifestFilenames": ["pom.xml", "build.gradle", "build.gradle.kts"]},
+            {"name": "evidence-coverage", "category": "compliance", "enabled": true},
             {"name": "evidence-before-release", "category": "compliance", "enabled": true}
           ]
         }
@@ -280,7 +283,76 @@ public class PolicyEngineTest {
         assertEquals("no-dependency-additions", result.ruleName(), "the firing rule must be named");
     }
 
-    // ---- 8. evidence-before-release ----
+    // ---- 8. evidence-coverage ----
+
+    /**
+     * Required test: a test agent that silently skips a criterion (generates no test for
+     * it, recording no Evidence for it whatsoever) produces exactly this state. This is
+     * the narrower check than evidence-before-release: a criterion with a real, recorded
+     * but FAILING piece of evidence would not trip this rule (it was attempted), only a
+     * criterion with zero Evidence records of any kind does.
+     */
+    public void testEvidenceCoverageDeniesWhenACriterionHasNoEvidenceRecordsAtAll() {
+        WorkflowNode releaseNode = nodeWithRisk("RELEASE", RiskLevel.CRITICAL);
+        List<AcceptanceCriterion> criteria = List.of(
+            new AcceptanceCriterion("AC-1", "attempted and passed", RiskLevel.LOW),
+            new AcceptanceCriterion("AC-2", "attempted and failed", RiskLevel.LOW),
+            new AcceptanceCriterion("AC-3", "never attempted at all", RiskLevel.LOW));
+        WorkflowState state = newState(releaseNode, criteria);
+        state.addEvidence(new Evidence(Evidence.Origin.EXECUTED, "AC-1", true, "a real test ran and passed",
+            "./gradlew test", "TEST", "test-results.log", Instant.now()));
+        state.addEvidence(new Evidence(Evidence.Origin.EXECUTED, "AC-2", false, "a real test ran and failed",
+            "./gradlew test", "TEST", "test-results.log", Instant.now()));
+        // AC-3 has no Evidence record at all: the test agent skipped it entirely.
+
+        RealPolicyEngine engineWithOnlyCoverageRule = new RealPolicyEngine(PolicyConfig.loadFromJson("""
+            {
+              "rules": [
+                {"name": "critical-risk-requires-approval", "category": "change-control", "enabled": false},
+                {"name": "high-risk-requires-approval", "category": "change-control", "enabled": false},
+                {"name": "evidence-coverage", "category": "compliance", "enabled": true}
+              ]
+            }
+            """));
+
+        PolicyRule.Result result = engineWithOnlyCoverageRule.evaluatePreExecutionWithReason(releaseNode, state,
+            new PolicyContext(null, null, "RUN-1", false));
+
+        assertEquals(PolicyEngine.Decision.DENY, result.decision(),
+            "release must be denied when AC-3 was never even attempted: " + result.reason());
+        assertEquals("evidence-coverage", result.ruleName(), "the firing rule must be named");
+        assertTrue(result.reason().contains("AC-3"), "the audit reason must name the uncovered criterion: " + result.reason());
+        assertTrue(!result.reason().contains("AC-1") && !result.reason().contains("AC-2"),
+            "AC-1 and AC-2 were both attempted (one passed, one failed) and must not be reported as uncovered: "
+                + result.reason());
+    }
+
+    public void testEvidenceCoverageAllowsWhenEveryCriterionHasAtLeastOneEvidenceRecordEvenIfFailing() {
+        WorkflowNode releaseNode = nodeWithRisk("RELEASE", RiskLevel.CRITICAL);
+        List<AcceptanceCriterion> criteria = List.of(new AcceptanceCriterion("AC-1", "attempted and failed", RiskLevel.LOW));
+        WorkflowState state = newState(releaseNode, criteria);
+        state.addEvidence(new Evidence(Evidence.Origin.EXECUTED, "AC-1", false, "a real test ran and failed",
+            "./gradlew test", "TEST", "test-results.log", Instant.now()));
+
+        RealPolicyEngine engineWithOnlyCoverageRule = new RealPolicyEngine(PolicyConfig.loadFromJson("""
+            {
+              "rules": [
+                {"name": "critical-risk-requires-approval", "category": "change-control", "enabled": false},
+                {"name": "high-risk-requires-approval", "category": "change-control", "enabled": false},
+                {"name": "evidence-coverage", "category": "compliance", "enabled": true}
+              ]
+            }
+            """));
+
+        PolicyRule.Result result = engineWithOnlyCoverageRule.evaluatePreExecutionWithReason(releaseNode, state,
+            new PolicyContext(null, null, "RUN-1", false));
+
+        assertEquals(PolicyEngine.Decision.ALLOW, result.decision(),
+            "evidence-coverage only checks that a criterion was attempted at all, not that it passed;"
+                + " a failing-but-present record must still allow: " + result.reason());
+    }
+
+    // ---- 9. evidence-before-release ----
 
     public void testEvidenceBeforeReleaseDeniesWhenACriterionLacksPassingEvidence() {
         RealPolicyEngine engine = newEngine();

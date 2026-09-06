@@ -17,12 +17,16 @@ import java.util.regex.Pattern;
 
 /**
  * The real policy engine, loaded from {@code workflows/policy.json} data rather than
- * hardcoded thresholds baked into this class. Eight rules across the three categories
- * the assignment names: change control, security, and compliance. Every rule's DENY or
- * REQUIRE_APPROVAL branch is proven reachable by a dedicated test that constructs an
- * input crafted to trip it; per CLAUDE.md rule 6, a threshold nothing in this project can
- * ever reach is a dead branch, not a control, so every threshold here was chosen or
- * adjusted specifically so a realistic input in this project's own test fixtures trips it.
+ * hardcoded thresholds baked into this class. Nine rules across the three categories
+ * the assignment names: change control, security, and compliance (compliance originally
+ * had two rules, {@code evidence-before-release} and {@code audit-completeness};
+ * {@code audit-completeness} was dropped as structurally unreachable and
+ * {@code evidence-coverage} added in its place, see docs/decisions.md). Every rule's
+ * DENY or REQUIRE_APPROVAL branch is proven reachable by a dedicated test that
+ * constructs an input crafted to trip it; per CLAUDE.md rule 6, a threshold nothing in
+ * this project can ever reach is a dead branch, not a control, so every threshold here
+ * was chosen or adjusted specifically so a realistic input in this project's own test
+ * fixtures trips it.
  */
 public final class RealPolicyEngine implements PolicyEngine {
 
@@ -67,6 +71,16 @@ public final class RealPolicyEngine implements PolicyEngine {
                     + currentRevision + ")");
         }
 
+        if (config.isEnabled("evidence-coverage") && node.riskLevel() == RiskLevel.CRITICAL) {
+            List<String> withNoEvidenceAtAll = criteriaWithNoEvidenceAtAll(state);
+            if (!withNoEvidenceAtAll.isEmpty()) {
+                return PolicyRule.Result.deny("evidence-coverage",
+                    "node " + node.id() + " is CRITICAL risk (a release gate) but " + withNoEvidenceAtAll.size()
+                        + " acceptance criterion(s) have zero associated Evidence records at all"
+                        + " (never attempted, not merely failed): " + withNoEvidenceAtAll);
+            }
+        }
+
         if (config.isEnabled("evidence-before-release") && node.riskLevel() == RiskLevel.CRITICAL) {
             List<String> uncovered = criteriaWithoutPassingEvidence(state);
             if (!uncovered.isEmpty()) {
@@ -77,6 +91,27 @@ public final class RealPolicyEngine implements PolicyEngine {
         }
 
         return PolicyRule.Result.allow("none", "no pre-execution rule denies or requires approval for node " + node.id());
+    }
+
+    /**
+     * The narrower compliance check: a criterion with zero {@link Evidence} records at
+     * all was never even attempted, distinct from {@link #criteriaWithoutPassingEvidence}
+     * (which also catches a criterion that was attempted and failed). A test agent that
+     * silently skips a criterion, generating no test for it and therefore recording no
+     * evidence for it whatsoever, produces exactly this state, which is what makes this
+     * rule's DENY branch genuinely reachable rather than a threshold nothing can trip.
+     */
+    private List<String> criteriaWithNoEvidenceAtAll(WorkflowState state) {
+        List<Evidence> evidence = state.getEvidence();
+        List<String> uncovered = new ArrayList<>();
+        for (AcceptanceCriterion criterion : state.getRequirementSpec().acceptanceCriteria()) {
+            boolean hasAnyEvidenceAtAll = evidence.stream()
+                .anyMatch(item -> item.acceptanceCriterionId().equals(criterion.id()));
+            if (!hasAnyEvidenceAtAll) {
+                uncovered.add(criterion.id());
+            }
+        }
+        return uncovered;
     }
 
     private List<String> criteriaWithoutPassingEvidence(WorkflowState state) {
