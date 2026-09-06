@@ -13,34 +13,38 @@ claim is checked by code that runs.
 
 ## Quickstart (no API key, no Docker, no network)
 
+**1. Smoke test.** Proves the build, the scheduler, entry/exit gates, the audit log, and
+real artifact writing all work from a clean clone, no key, no network. This is a
+two-node graph (REQUIREMENT then DOCUMENT), not the governance graph, stated here
+plainly: it exists to prove the machine runs, not to demonstrate governance depth.
+
 ```bash
 git clone <repo> && cd Agentic-Software-Engineering-System
-./scripts/run.sh greenfield --replay --auto-approve --run-id DEMO
-cat runs/DEMO/state.json
+./scripts/run.sh greenfield --replay --auto-approve --run-id DEMO-SMOKE \
+  --workflow "$(pwd)/workflows/approval-demo.json"
+cat runs/DEMO-SMOKE/state.json
 ```
 
-This builds the orchestrator with `javac` only, then runs the real eight-node governance
-graph (`workflows/sdlc-default.json`) against pre-recorded fixtures under `fixtures/`,
-with no network call and no `ANTHROPIC_API_KEY` required. **It currently ends
-`SAFE_STOPPED`, not `COMPLETED`, stated here plainly rather than left for a reviewer to
-discover:** REQUIREMENT's first real attempt correctly finds genuine unanswered questions
-in the requirement text and fails its exit gate, exactly as designed; the automatic
-retry that follows then crashes with a `MissingFixtureException`, because that retry's
-fixture was recorded before a later fix changed the retry-reason text embedded in the
-prompt. The first attempt is real, designed governance working; the retry crash on top
-of it is a real, understood, credit-blocked limitation, not a clean stop on ambiguity by
-itself. See [docs/design.md](docs/design.md) section 3.2 for the exact request hash and
-cause.
+This ends `COMPLETED` and writes real artifacts to `runs/DEMO-SMOKE/artifacts/`.
 
-To see a real run reach `COMPLETED` end to end, with real artifacts written to disk, run
-the smaller two-node demo graph instead (REQUIREMENT then DOCUMENT, the graph spec 05
-built specifically to prove resume across a process boundary, not the full pipeline):
+**2. The real graph.** `workflows/sdlc-default.json`, the actual eight-node governance
+graph every scenario below runs against:
 
 ```bash
-./scripts/run.sh greenfield --replay --auto-approve --run-id DEMO-COMPLETE \
-  --workflow "$(pwd)/workflows/approval-demo.json"
-cat runs/DEMO-COMPLETE/state.json
+./scripts/run.sh greenfield --replay --auto-approve --run-id DEMO-REAL
+cat runs/DEMO-REAL/state.json
 ```
+
+This currently ends `SAFE_STOPPED`, not `COMPLETED`, stated here plainly rather than left
+for a reviewer to discover: REQUIREMENT's first real attempt correctly finds genuine
+unanswered questions in the requirement text and fails its exit gate, exactly as
+designed. The automatic retry that follows then **crashes** with a
+`MissingFixtureException`, because that retry's fixture was recorded before a later fix
+changed the retry-reason text embedded in the prompt. The first attempt is real, designed
+governance working as intended; the retry crash on top of it is a real, credit-blocked
+limitation, not designed behavior, and the two should not be read as one continuous clean
+stop. See [docs/design.md](docs/design.md) section 3.2 for the exact request hash and
+cause.
 
 ## Architecture, in one picture
 
