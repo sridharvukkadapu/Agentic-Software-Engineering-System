@@ -96,7 +96,16 @@ real Postgres one under `src/main/resources/db/migration/postgresql/`.
   clears it afterward, so it is available to any log statement without threading it
   through every method signature, and cannot leak onto a later request when the servlet
   container reuses the handling thread.
+- Click analytics: every redirect resolution increments a per-URL `click_count`, exposed
+  on the lookup endpoint's response. Recorded through `ClickRecorder` in its own
+  `REQUIRES_NEW` transaction so a click is not lost when the surrounding request fails.
 - Scope for this pass is the core APIs (create, redirect, lookup) plus expiry, clock
-  injection, correlation ids, and a global exception handler. Rate limiting, SSRF
-  validation, idempotency keys, click analytics, and OpenAPI documentation are
-  deliberately deferred to a later change.
+  injection, correlation ids, click analytics, and a global exception handler. Rate
+  limiting, SSRF validation, idempotency keys, and OpenAPI documentation are deliberately
+  deferred to a later change.
+
+> **Note for reviewers:** this service intentionally contains one seeded defect, planted
+> in its own clearly labelled commit (`Seed the brownfield regression: expired links still
+> count as clicks`) so the `brownfield` scenario has a real bug in real code to find. It
+> is described in `scenarios/brownfield/requirement.md` as a bug report, without naming
+> the cause. Do not treat it as an oversight.

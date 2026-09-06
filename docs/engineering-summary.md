@@ -114,10 +114,14 @@ stand-in, was actually behind the wheel.
   printing "not yet implemented" until specs 06 and 08 respectively built them out, so
   the CLI's real surface area was visible from spec 05 onward rather than appearing all
   at once.
-- **Rate limiting, SSRF validation, idempotency keys, click analytics, and OpenAPI
-  configuration were explicitly cut from target-service's spec 07 scope.** None of these
-  bear on what the assignment scores (the orchestration layer), and building them would
-  have spent session time the governance machinery needed more.
+- **Rate limiting, SSRF validation, idempotency keys, and OpenAPI configuration were
+  explicitly cut from target-service's spec 07 scope.** None of these bear on what the
+  assignment scores (the orchestration layer), and building them would have spent session
+  time the governance machinery needed more. Click analytics was cut in that same pass and
+  later restored: assignment section 2 names analytics as part of the service, and the
+  `brownfield` scenario's bug report is specifically about analytics on expired links, so
+  cutting it had left that scenario describing a defect in code that did not exist. It is
+  now implemented, and the defect is seeded deliberately in its own labelled commit.
 - **Cross-stage context threading for the full eight-node graph was deferred past spec
   05**, once it became clear that spec 05's actual acceptance criteria (resume survives
   a real process boundary) did not require it; building it anyway would have been scope

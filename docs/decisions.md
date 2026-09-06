@@ -501,3 +501,48 @@ real compiler catching a real mismatch between what the model assumed and what t
 actually has, and a real prompt fix (not a fixture edit, not a gate exception) closing the
 gap. This is the single clearest piece of evidence in the whole build that the agent layer
 is genuinely calling a live model rather than standing in a rehearsed answer.
+
+## D10. The obvious way to seed the brownfield regression does not actually regress
+
+**Problem.** `scenarios/brownfield/requirement.md` is a bug report: expired links keep
+counting clicks. Reviewing the repo against the assignment surfaced that the bug report
+described behaviour that did not exist anywhere in `target-service`. There was no click
+counting at all (spec 07 had cut it), so `UrlService`'s own javadoc noted the ordering
+constraint was satisfied "by there being no click-recording code path at all for it to
+race against". The brownfield scenario was therefore asking an agent to do codebase
+reasoning (core requirement 3) about a defect in code that was not there, and assignment
+section 2 names analytics as part of the service besides.
+
+**Decision.** Implement click analytics for real, then seed the defect deliberately in a
+separate, clearly labelled commit so a reviewer can see exactly what was planted.
+
+The seeding is where this stopped being routine. The obvious defect, moving
+`url.recordClick()` above the expiry check inside one `@Transactional` method, does not
+regress at all. `UrlExpiredException` is a `RuntimeException`, so Spring marks the
+transaction rollback-only and the increment is discarded: the expired-link click count
+stays correct. Verified empirically rather than assumed, by writing the guard test first
+and watching it keep passing against the supposedly broken code. Shipping that would have
+been the worst outcome available: code that reads as broken, behaves correctly, and gives
+an agent a "bug" with no observable symptom to find.
+
+The real defect records the click through a `ClickRecorder` bean with `REQUIRES_NEW`
+propagation, which commits independently of the outer rollback. A separate bean is
+required, not stylistic: Spring's transaction proxy does not apply to self-invocation, so
+a `REQUIRES_NEW` method called from a sibling method of the same bean silently runs in the
+caller's transaction and does nothing it claims to. With that in place the guard test
+fails (count 2, expected 1) while `resolvingALiveLinkRecordsAClick` still passes, which is
+exactly the reported symptom: live links count correctly, expired ones over-count.
+
+**Trade-off.** The guard test is removed in the same commit as the defect, so the suite
+ships green at 26 tests with the bug present. That mirrors how the defect would really
+have shipped (nothing caught it) and keeps the repo in a normal-looking state, but it does
+mean the codebase contains a known-wrong behaviour with no failing signal, which is only
+acceptable because the commit message, `target-service/README.md`, and this entry all say
+so plainly. The alternative, leaving a failing or `@Disabled` test in place, would have
+either shipped a red suite or handed the agent the answer, defeating the point of the
+scenario.
+
+Notably, the propagation choice is individually defensible. "Never lose analytics when a
+request errors" is a reasonable thing to want, and reads as deliberate care rather than
+carelessness. It is wrong only in combination with the ordering, which is what makes it a
+realistic regression instead of an obviously planted one.

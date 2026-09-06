@@ -105,7 +105,7 @@ section 3.2 for the exact request hashes.
 | Scenario | Real terminal status | What actually happens | Committed run |
 |---|---|---|---|
 | `greenfield` | `SAFE_STOPPED` at REQUIREMENT | Attempt 1: real open-questions gate failure (designed). Attempt 2 (retry): crashes on a stale fixture (`MissingFixtureException`), not a clean re-evaluation. | [runs/GREENFIELD-DEMO/](runs/GREENFIELD-DEMO/) |
-| `brownfield` | `SAFE_STOPPED` at REQUIREMENT | Same pattern: real gate failure on attempt 1, retry crashes on a stale fixture. | [runs/BROWNFIELD-DEMO/](runs/BROWNFIELD-DEMO/) |
+| `brownfield` | `SAFE_STOPPED` at REQUIREMENT | Same pattern: real gate failure on attempt 1, retry crashes on a stale fixture. The defect it reports is really present in `target-service`, planted in its own labelled commit (`Seed the brownfield regression`), so the codebase reasoning this scenario asks for has real code to find. | [runs/BROWNFIELD-DEMO/](runs/BROWNFIELD-DEMO/) |
 | `ambiguous` | `SAFE_STOPPED` at REQUIREMENT | Same pattern, with the most open questions of the three (7) on attempt 1; retry crashes on a stale fixture. | [runs/AMBIGUOUS-DEMO/](runs/AMBIGUOUS-DEMO/) |
 | policy denial (no scenario, standalone) | `SAFE_STOPPED`, real `POLICY_DENIED` audit event | A node modifies a file inside its declared `writePaths` and writes a second file outside them; policy denies the node, and rollback restores the in-contract file to its original content, verified by content hash (`restored 1 file(s)`, not 0). No agent call, no credit. | [runs/POLICY-DENIAL-DEMO/](runs/POLICY-DENIAL-DEMO/) |
 
