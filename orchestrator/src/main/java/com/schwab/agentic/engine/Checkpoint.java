@@ -149,6 +149,83 @@ public final class Checkpoint {
         return handle.files().size();
     }
 
+    /**
+     * Restores a checkpoint by label, without needing the in-memory {@link Handle} the
+     * original {@link #take} call returned. {@link com.schwab.agentic.engine.WorkflowEngine}
+     * keeps a node's handle only for the life of one engine instance; re-planning (spec
+     * 06) invalidates a node that may have completed in an earlier wave, an earlier
+     * process, or before this engine instance existed at all, so its handle is gone by
+     * the time a re-plan needs to restore it. The checkpoint directory on disk is the
+     * only thing that survives that gap, so this method rebuilds a {@link Handle} by
+     * walking it directly and re-hashing what it finds there, then restores exactly as
+     * {@link #restore} always has: delete the declared write paths, copy the checkpoint
+     * back, verify every restored file's hash. Throws if no checkpoint was ever taken
+     * under this label, since restoring from a checkpoint that does not exist would
+     * otherwise silently do nothing.
+     */
+    public int restoreFromDisk(Path sourceDirectory, Path runsDirectory, String runId, String label,
+                                Set<String> writePaths) {
+        Path checkpointDirectory = runsDirectory.resolve(runId).resolve("checkpoints").resolve(label);
+        if (!Files.isDirectory(checkpointDirectory)) {
+            throw new IllegalStateException(
+                "No checkpoint found for label " + label + " under run " + runId + " at " + checkpointDirectory);
+        }
+        List<FileRecord> records = new ArrayList<>();
+        try (Stream<Path> walk = Files.walk(checkpointDirectory)) {
+            for (Path path : walk.filter(Files::isRegularFile).toList()) {
+                Path relative = checkpointDirectory.relativize(path);
+                records.add(new FileRecord(relative.toString(), hashOf(path)));
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to read checkpoint " + label + " for run " + runId, e);
+        }
+        Handle handle = new Handle(runId, label, sourceDirectory, checkpointDirectory, Set.copyOf(writePaths),
+            List.copyOf(records));
+        return restore(handle);
+    }
+
+    /**
+     * Copies the current, real content of {@code writePaths} (as they stand right now,
+     * before any restore) to {@code runsDirectory}/&lt;runId&gt;/archive/&lt;label&gt;/,
+     * so a re-plan that is about to overwrite an invalidated node's output with its
+     * pre-attempt checkpoint preserves what that node actually produced, rather than
+     * discarding it. Unlike {@link #take}, which records content hashes for later
+     * verification, this is a one-way archival copy with nothing to restore from it, so
+     * no {@link FileRecord} bookkeeping is needed. A write path that does not currently
+     * exist is skipped, matching {@link #take}'s own handling of a not-yet-created path.
+     */
+    public void archive(Path sourceDirectory, Path runsDirectory, String runId, String label, Set<String> writePaths) {
+        Path archiveDirectory = runsDirectory.resolve(runId).resolve("archive").resolve(label);
+        try {
+            Files.createDirectories(archiveDirectory);
+            for (String writePath : writePaths) {
+                Path absolute = sourceDirectory.resolve(writePath);
+                if (!Files.exists(absolute)) {
+                    continue;
+                }
+                if (Files.isRegularFile(absolute)) {
+                    Path destination = archiveDirectory.resolve(writePath);
+                    Files.createDirectories(destination.getParent());
+                    Files.copy(absolute, destination, StandardCopyOption.REPLACE_EXISTING);
+                } else {
+                    try (Stream<Path> walk = Files.walk(absolute)) {
+                        for (Path path : (Iterable<Path>) walk::iterator) {
+                            if (isExcluded(sourceDirectory, path) || Files.isDirectory(path)) {
+                                continue;
+                            }
+                            Path relative = sourceDirectory.relativize(path);
+                            Path destination = archiveDirectory.resolve(relative);
+                            Files.createDirectories(destination.getParent());
+                            Files.copy(path, destination, StandardCopyOption.REPLACE_EXISTING);
+                        }
+                    }
+                }
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to archive " + label + " for run " + runId, e);
+        }
+    }
+
     /** Every checkpoint taken for a run, most recent last, by scanning the checkpoints directory. */
     public List<String> list(Path runsDirectory, String runId) {
         Path checkpointsRoot = runsDirectory.resolve(runId).resolve("checkpoints");

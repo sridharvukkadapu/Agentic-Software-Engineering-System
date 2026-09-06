@@ -251,6 +251,28 @@ public final class WorkflowState {
         return List.copyOf(evidence);
     }
 
+    /**
+     * Removes every evidence record produced by one of {@code nodeIds} and returns
+     * exactly what was removed, for the caller (spec 06's {@code Replanner}) to report in
+     * the REPLAN audit event's details. This is real removal, not a flag: {@link
+     * #getEvidence} can never return a revoked record again, so a gate that checks
+     * evidence after a re-plan has no way to observe pre-amendment proof and treat it as
+     * still satisfying a criterion, which is the exact failure mode CLAUDE.md's
+     * re-planning rule exists to prevent.
+     */
+    public synchronized List<Evidence> revokeEvidenceFrom(Set<String> nodeIds) {
+        List<Evidence> revoked = new ArrayList<>();
+        java.util.Iterator<Evidence> iterator = evidence.iterator();
+        while (iterator.hasNext()) {
+            Evidence item = iterator.next();
+            if (nodeIds.contains(item.producedByNode())) {
+                revoked.add(item);
+                iterator.remove();
+            }
+        }
+        return revoked;
+    }
+
     public synchronized void addDecision(DecisionRecord decision) {
         if (decision == null) {
             throw new IllegalArgumentException("addDecision decision must not be null");
@@ -275,6 +297,16 @@ public final class WorkflowState {
 
     public synchronized int getRetryCount(String nodeId) {
         return retryCounts.getOrDefault(nodeId, 0);
+    }
+
+    /**
+     * Clears a node's retry count back to zero, used when re-planning (spec 06)
+     * invalidates a completed node: its re-execution after the amendment is a fresh
+     * start, not a continuation of whatever attempt budget it happened to have consumed
+     * before the requirement changed underneath it.
+     */
+    public synchronized void resetRetryCount(String nodeId) {
+        retryCounts.remove(nodeId);
     }
 
     public synchronized int getRollbackCount() {

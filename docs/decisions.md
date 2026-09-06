@@ -405,3 +405,59 @@ the prior recording's file set once `implement` changed); `FixtureRecorder` gain
 API credit only on the affected stages. The full 148-test suite, including
 `testFullGreenfieldPipelineReachesRealReleaseCompleted`, passes under `--replay` with no
 network access and no API key.
+
+## D8. Re-planning reuses spec 05's mechanisms instead of building new ones
+
+**Problem.** Spec 06 asks for four things when an amended requirement invalidates a
+node's downstream work: revert its output, revoke its evidence, stop honoring its
+approval, and archive what it produced. A naive reading treats all four as new machinery
+this spec must build. Two of them are not.
+
+**Decision.** `Replanner.replan` computes `graph.downstreamOf(changedNodeId)` (already
+built, unused until now) and invalidates exactly the members of that set that are
+currently COMPLETED, nothing else. For approvals, `ApprovalStore.hasValidApproval` was
+already keyed by `(nodeId, requirementRevision)` since spec 05; the moment
+`WorkflowState.replaceRequirementSpec` bumps the revision, every approval recorded
+against the prior revision stops satisfying that check on its own. `Replanner` does not
+touch `ApprovalStore` at all. For rollback, `WorkflowEngine`'s own javadoc already named
+the gap: "rolling back a node whose status is INVALIDATED has no caller anywhere in this
+class... deciding which checkpoint applies to an invalidated node is spec 06's decision
+to make." The decision is: the same checkpoint a completed node's own first attempt took,
+restored via a new `Checkpoint.restoreFromDisk`, since `WorkflowEngine`'s in-memory
+`checkpointHandlesByNodeId` map does not survive past one engine instance and a re-plan
+may run in a fresh process (the CLI's `amend` command, in particular, always does).
+`restoreFromDisk` rebuilds a `Checkpoint.Handle` by walking the checkpoint directory on
+disk and re-hashing what it finds, rather than requiring the original in-memory handle.
+
+Only evidence revocation and archival are genuinely new. `WorkflowState.revokeEvidenceFrom`
+removes matching records outright (not a flag), so `getEvidence()` can never return a
+revoked record to a gate again. `Checkpoint.archive` copies an invalidated node's current
+write-path content to `runs/<runId>/archive/rev<n>/<nodeId>/` before the restore
+overwrites it, per this project's explicit correction over the spec doc's own
+`superseded/rev<n>/` path: the two names differ, the mechanism (copy before restore,
+never delete) does not.
+
+A node currently RUNNING when a re-plan arrives cannot be forced into INVALIDATED:
+`NodeStatus.canTransitionTo` has no legal edge from RUNNING to INVALIDATED (only
+COMPLETED, FAILED, or ROLLED_BACK can reach it), because an in-flight attempt has
+produced nothing yet that archiving, checkpoint-restoring, or evidence-revoking could
+safely act on. `Replanner` therefore only ever considers a downstream node's *current*
+status; a RUNNING node is left to finish its in-flight attempt and is simply not a member
+of the invalidated set this time, a real, chosen, and tested policy (AC-06-9), not
+undefined behavior.
+
+**Trade-off.** `Replanner` has no dependency on `ApprovalStore` at all, which looks like
+an omission until you trace why: building one would duplicate a check spec 05 already
+performs correctly. The CLI's `amend` command re-runs `RequirementExecutor` against the
+amended file itself (reusing the exact same executor and fixture-replay path `run` and
+`resume` already use) and passes the result to `Replanner` as `changedNodeId = "REQUIREMENT"`,
+always: amending the requirement is definitionally a change to what REQUIREMENT produced,
+so there is no second "which node changed" question for this entry point to answer.
+Verified against `workflows/approval-demo.json` end to end via the real CLI, not only
+unit tests: `run --auto-approve` completes REQUIREMENT and DOCUMENT, `amend` bumps the
+revision and invalidates DOCUMENT (real REPLAN audit event, real state.json), `resume`
+puts DOCUMENT back to WAITING_APPROVAL (spec 05's own HIGH-risk rule, now checked against
+revision 2), and after a fresh `approve` and `resume` the run reaches COMPLETED again.
+Each of `Replanner`'s three real mechanisms (the COMPLETED-only invalidation filter,
+evidence revocation, and checkpoint archival) was verified non-vacuously: deliberately
+removed in isolation, confirmed to break exactly its own test and no other, then restored.

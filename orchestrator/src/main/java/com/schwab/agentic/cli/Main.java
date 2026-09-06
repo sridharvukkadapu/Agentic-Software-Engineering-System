@@ -9,10 +9,12 @@ import com.schwab.agentic.engine.Gates;
 import com.schwab.agentic.engine.NodeExecutorRegistry;
 import com.schwab.agentic.engine.PolicyConfig;
 import com.schwab.agentic.engine.RealPolicyEngine;
+import com.schwab.agentic.engine.Replanner;
 import com.schwab.agentic.engine.WorkflowEngine;
 import com.schwab.agentic.executor.DocumentExecutor;
 import com.schwab.agentic.executor.RequirementExecutor;
 import com.schwab.agentic.graph.WorkflowGraph;
+import com.schwab.agentic.json.Json;
 import com.schwab.agentic.model.AcceptanceCriterion;
 import com.schwab.agentic.model.RequirementSpec;
 import com.schwab.agentic.model.RiskLevel;
@@ -21,6 +23,7 @@ import com.schwab.agentic.model.WorkflowStatus;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -60,7 +63,7 @@ public final class Main {
                 case "run" -> runCommand(args);
                 case "resume" -> resumeCommand(args);
                 case "approve" -> approveCommand(args);
-                case "amend" -> System.out.println("amend is spec 06's re-planning; not yet implemented.");
+                case "amend" -> amendCommand(args);
                 case "report" -> System.out.println("report is spec 08's reporting; not yet implemented.");
                 default -> {
                     System.err.println("Unknown command: " + command);
@@ -79,7 +82,8 @@ public final class Main {
               run --workflow <path> --requirement <path> [--live | --replay] [--auto-approve] [--fixtures <dir>] [--runs <dir>] [--run-id <id>]
               resume --run-id <id> [--workflow <path>] [--live | --replay] [--fixtures <dir>] [--runs <dir>]
               approve --run-id <id> <nodeId> --by "<name>" --reason "<text>" [--runs <dir>]
-              amend, report: not yet implemented (spec 06 / spec 08)
+              amend --run-id <id> --requirement <file> [--workflow <path>] [--target-service <path>] [--runs <dir>] [--fixtures <dir>]
+              report: not yet implemented (spec 08)
             """);
         System.exit(2);
     }
@@ -220,6 +224,103 @@ public final class Main {
 
         engine.approve(nodeId, approver, reason);
         System.out.println("Approved " + nodeId + " for run " + runId + " by " + approver);
+    }
+
+    // ---- amend ----
+
+    /**
+     * Amends a paused or completed run's requirement from a fresh file, re-plans from
+     * REQUIREMENT (the amended node), and persists the result: {@code state.json} reflects
+     * every invalidated node back at PENDING, {@code approvals.json} is unchanged on disk
+     * (spec 05's own revision-keyed {@code hasValidApproval} check is what makes a prior
+     * approval stop counting, not a rewrite of the approval file), and the run is left
+     * ready for {@code resume} to re-execute exactly the nodes the re-plan invalidated.
+     * REQUIREMENT is always the changed node for this entry point, since amending the
+     * requirement is definitionally a change to what REQUIREMENT itself produced; a
+     * scenario that declares {@code amendAfterNode} for a different node is spec 06's
+     * other entry point (a mid-run amendment during a single demo command), which this
+     * CLI subcommand does not need to serve.
+     */
+    private static void amendCommand(String[] args) {
+        CliArgs cliArgs = CliArgs.parse(args);
+        String runId = cliArgs.requireValue("--run-id");
+        Path amendedRequirementPath = cliArgs.requirePath("--requirement");
+        Path runsDirectory = cliArgs.pathOrDefault("--runs", Path.of("runs"));
+        Path fixturesDirectory = cliArgs.pathOrDefault("--fixtures", Path.of("fixtures"));
+        Path workflowPath = cliArgs.pathOrDefault("--workflow", Path.of("workflows/approval-demo.json"));
+        Path targetServiceDirectory = cliArgs.pathOrDefault("--target-service", null);
+        boolean live = cliArgs.hasFlag("--live");
+
+        Path statePath = runsDirectory.resolve(runId).resolve("state.json");
+        if (!Files.isRegularFile(statePath)) {
+            throw new IllegalArgumentException("No state.json found for run " + runId + " at " + statePath);
+        }
+        WorkflowState state;
+        try {
+            state = WorkflowState.fromJsonString(Files.readString(statePath));
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to read " + statePath, e);
+        }
+
+        WorkflowGraph graph = WorkflowGraph.loadFromFile(workflowPath);
+
+        Path amendArtifactsDirectory = runsDirectory.resolve(runId).resolve("artifacts");
+        AgentClient requirementClient = agentClientFor(live, fixturesDirectory.resolve("cli").resolve("requirement"),
+            state);
+        RequirementExecutor requirementExecutor = new RequirementExecutor(requirementClient, amendArtifactsDirectory);
+        var reparsed = requirementExecutor.execute(graph.getNode("REQUIREMENT"),
+            Map.of("requirementPath", amendedRequirementPath.toString()));
+        if (!reparsed.executorReportedSuccess()) {
+            throw new IllegalStateException("Amended requirement could not be parsed: " + reparsed.summary());
+        }
+
+        RequirementSpec amended = buildAmendedRequirementSpec(state.getRequirementSpec(), amendArtifactsDirectory);
+
+        Replanner replanner = new Replanner(graph, new Checkpoint(), targetServiceDirectory, runsDirectory);
+        java.util.Set<String> invalidated = replanner.replan(state, "REQUIREMENT", amended);
+
+        ApprovalStore approvalStore = ApprovalStore.loadFromFile(runsDirectory, runId);
+        state.setWorkflowStatus(WorkflowStatus.RUNNING);
+        Path outStatePath = runsDirectory.resolve(runId).resolve("state.json");
+        try {
+            Files.createDirectories(outStatePath.getParent());
+            Files.writeString(outStatePath, state.toJsonString());
+        } catch (IOException e) {
+            throw new java.io.UncheckedIOException("Failed to write " + outStatePath, e);
+        }
+        approvalStore.saveToFile(runsDirectory, runId);
+
+        System.out.println("Amended run " + runId + " to requirement revision " + amended.revision());
+        System.out.println("Invalidated " + invalidated.size() + " node(s): "
+            + invalidated.stream().sorted().toList());
+        System.out.println("Run './scripts/resume.sh " + runId + "' to re-execute the invalidated nodes.");
+    }
+
+    /**
+     * Rebuilds a {@link RequirementSpec} at the next revision from the requirement-spec.json
+     * {@link RequirementExecutor} just wrote for the amended text, reusing
+     * {@link RequirementSpec#withNextRevision} so the revision counter is always exactly
+     * one greater than whatever the run was at before, never a value re-typed by hand.
+     */
+    @SuppressWarnings("unchecked")
+    private static RequirementSpec buildAmendedRequirementSpec(RequirementSpec previous, Path artifactsDirectory) {
+        Path requirementSpecPath = artifactsDirectory.resolve("requirement-spec.json");
+        Map<String, Object> parsed;
+        try {
+            parsed = (Map<String, Object>) Json.parse(Files.readString(requirementSpecPath));
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to read " + requirementSpecPath, e);
+        }
+        List<AcceptanceCriterion> criteria = new ArrayList<>();
+        for (Object criterionObj : (List<Object>) parsed.get("acceptanceCriteria")) {
+            Map<String, Object> criterionJson = (Map<String, Object>) criterionObj;
+            criteria.add(new AcceptanceCriterion(
+                (String) criterionJson.get("id"),
+                (String) criterionJson.get("description"),
+                RiskLevel.valueOf((String) criterionJson.get("riskLevel"))));
+        }
+        return previous.withNextRevision((String) parsed.get("rawText"), (String) parsed.get("normalizedProblem"),
+            criteria);
     }
 
     // ---- shared wiring ----
