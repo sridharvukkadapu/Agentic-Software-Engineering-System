@@ -115,6 +115,7 @@ public final class ImpactExecutor implements NodeExecutor {
                 .filter(path -> !path.toString().contains("/.git/"))
                 .filter(path -> !path.toString().contains("/target/"))
                 .filter(path -> !path.toString().contains("/build/"))
+                .filter(path -> !path.toString().contains("/.gradle/"))
                 .map(path -> targetServiceDirectory.relativize(path).toString())
                 .sorted()
                 .toList();
