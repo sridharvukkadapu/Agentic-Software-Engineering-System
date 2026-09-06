@@ -130,8 +130,9 @@ public final class Main {
             List.<AcceptanceCriterion>of());
         WorkflowState state = new WorkflowState(runId, placeholderSpec, graph.getAllNodes());
 
+        String scenarioName = scenarioNameFrom(requirementPath);
         WorkflowEngine engine = buildEngine(graph, state, runsDirectory, fixturesDirectory, targetServiceDirectory,
-            buildCommand, testCommand, live, autoApprove, new ApprovalStore());
+            buildCommand, testCommand, live, autoApprove, new ApprovalStore(), scenarioName);
         engine.withInitialContext("REQUIREMENT", Map.of("requirementPath", requirementPath.toString()));
         seedCrossNodeContext(engine, runsDirectory, runId, targetServiceDirectory);
 
@@ -139,6 +140,18 @@ public final class Main {
             + (autoApprove ? ", auto-approve" : "") + ")");
         WorkflowStatus outcome = engine.run();
         reportOutcome(runId, outcome, state);
+    }
+
+    /**
+     * The scenario a requirement file belongs to, by convention its immediate parent
+     * directory name ({@code scenarios/<name>/requirement.md}), so REQUIREMENT's fixture
+     * lookup can use that scenario's own real recorded fixture (its exact real request
+     * hash depends on the real requirement text, which differs per scenario) instead of
+     * one hardcoded directory that only ever matched greenfield's text.
+     */
+    private static String scenarioNameFrom(Path requirementPath) {
+        Path parent = requirementPath.toAbsolutePath().getParent();
+        return parent == null ? "greenfield" : parent.getFileName().toString();
     }
 
     /**
@@ -321,8 +334,9 @@ public final class Main {
             "run resumed after " + statusBeforeResume + ", pause duration " + pauseDuration,
             Map.of("previousStatus", statusBeforeResume.name(), "pauseDurationMillis", (double) pauseDuration.toMillis()));
 
+        String scenarioName = cliArgs.valueOrDefault("--scenario", "greenfield");
         WorkflowEngine engine = buildEngine(graph, state, runsDirectory, fixturesDirectory, targetServiceDirectory,
-            buildCommand, testCommand, live, false, approvalStore);
+            buildCommand, testCommand, live, false, approvalStore, scenarioName);
         seedCrossNodeContext(engine, runsDirectory, runId, targetServiceDirectory);
 
         System.out.println("Resuming run " + runId + " (was " + statusBeforeResume + ")");
@@ -362,8 +376,10 @@ public final class Main {
 
         WorkflowGraph graph = WorkflowGraph.loadFromFile(workflowPath);
         ApprovalStore approvalStore = ApprovalStore.loadFromFile(runsDirectory, runId);
+        String scenarioName = cliArgs.valueOrDefault("--scenario", "greenfield");
         WorkflowEngine engine = buildEngine(graph, state, runsDirectory, Path.of("fixtures"),
-            Path.of("target-service"), DEFAULT_BUILD_COMMAND, DEFAULT_TEST_COMMAND, false, false, approvalStore);
+            Path.of("target-service"), DEFAULT_BUILD_COMMAND, DEFAULT_TEST_COMMAND, false, false, approvalStore,
+            scenarioName);
 
         engine.approve(nodeId, approver, reason);
         System.out.println("Approved " + nodeId + " for run " + runId + " by " + approver);
@@ -480,18 +496,28 @@ public final class Main {
     private static WorkflowEngine buildEngine(WorkflowGraph graph, WorkflowState state, Path runsDirectory,
                                                Path fixturesDirectory, Path targetServiceDirectory,
                                                String buildCommand, String testCommand, boolean live,
-                                               boolean autoApprove, ApprovalStore approvalStore) {
+                                               boolean autoApprove, ApprovalStore approvalStore, String scenarioName) {
         NodeExecutorRegistry registry = new NodeExecutorRegistry();
         Path artifactsDirectory = runsDirectory.resolve(state.getRunId()).resolve("artifacts");
         String runId = state.getRunId();
 
-        // cli/requirement and greenfield/requirement were both recorded live against the
-        // exact same real request (same requirement.md text, same maxTokens), so they
-        // share a request hash, but a real model's output is not deterministic across
-        // two separate live calls: their real recorded responses differ. cli/requirement
-        // is used here since it is the one MainCliResumeTest (approval-demo.json's own
-        // test) depends on; it is equally valid content for the same real request.
-        AgentClient requirementClient = agentClientFor(live, fixturesDirectory.resolve("cli").resolve("requirement"), state);
+        // A graph with no DESIGN node (approval-demo.json) is the small, two-stage CLI
+        // demo shape spec 05 built to prove persistence and resume, not any particular
+        // scenario's real content: DOCUMENT there depends directly on REQUIREMENT and
+        // reads REQUIREMENT's own spec as a designSpec stand-in (see
+        // seedCrossNodeContext's DOCUMENT fallback), a shape recorded once, as a pair,
+        // under fixtures/cli/{requirement,document}. Using any other scenario's real
+        // REQUIREMENT fixture there would still produce a valid REQUIREMENT response, but
+        // a real one DOCUMENT's own already-recorded fixture was never paired with, so
+        // DOCUMENT would then fail to find a match. A graph that does declare a DESIGN
+        // node (sdlc-default.json) is the real eight-node pipeline, whose REQUIREMENT
+        // fixture must instead come from the run's actual scenario, since every scenario
+        // this project ships (greenfield, brownfield, ambiguous) sends genuinely
+        // different requirement.md text and was recorded under its own directory.
+        boolean isTwoStageDemoGraph = graph.getAllNodes().stream().noneMatch(node -> node.id().equals("DESIGN"));
+        String requirementFixtureScenario = isTwoStageDemoGraph ? "cli" : scenarioName;
+        AgentClient requirementClient = agentClientFor(live,
+            fixturesDirectory.resolve(requirementFixtureScenario).resolve("requirement"), state);
         registry.register("requirement", new RequirementExecutor(requirementClient, artifactsDirectory));
 
         AgentClient impactClient = agentClientFor(live, fixturesDirectory.resolve("greenfield").resolve("impact"), state);
