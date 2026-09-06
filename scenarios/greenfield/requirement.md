@@ -28,7 +28,25 @@ following it.
   both `null`.
 - No rate limiting is required for this endpoint in this iteration; it is out of scope.
 - If the short code does not exist, return 404, consistent with the existing lookup and
-  redirect endpoints.
+  redirect endpoints. The 404 response body is a plain JSON object
+  `{"error": "not found"}`; it does not need to match any other endpoint's error schema
+  beyond the status code.
+- A fetch failure, a timeout, and an SSRF block are each cached for the same 1-hour TTL as
+  a successful preview. Do not retry more aggressively than a successful lookup would; a
+  target that is down stays down for longer than one request, and re-fetching on every
+  call would defeat the purpose of caching.
+- The SSRF check also blocks IPv6 private and reserved ranges: loopback (`::1`), unique
+  local (`fc00::/7`), and link-local (`fe80::/10`), in addition to the IPv4 ranges already
+  listed. Treat a target resolving to any of these the same as a fetch failure.
+- The outbound fetcher does not follow HTTP redirects. A redirect response (3xx) from the
+  target is treated the same as any other fetch failure: HTTP 200, `title` and
+  `description` both `null`. This is deliberate, not an oversight: following redirects
+  would mean re-validating the SSRF check against a URL the server did not originally
+  request, which is exactly the kind of check this requirement does not want to get
+  wrong by omission.
+- The outbound fetch reads at most 1 megabyte of the target page's response body. If the
+  page is larger, stop reading at that limit and parse only what was read; a `<title>` or
+  meta description past that point is treated as absent (`null`), not an error.
 
 This is new functionality on the URL shortener; no existing preview mechanism exists to
 build on.
