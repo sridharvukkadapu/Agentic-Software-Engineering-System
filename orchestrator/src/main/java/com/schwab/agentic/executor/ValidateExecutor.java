@@ -6,6 +6,7 @@ import com.schwab.agentic.model.AcceptanceCriterion;
 import com.schwab.agentic.model.Evidence;
 import com.schwab.agentic.model.RiskLevel;
 import com.schwab.agentic.model.WorkflowNode;
+import com.schwab.agentic.model.WorkflowState;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
@@ -27,22 +28,28 @@ import java.util.regex.Pattern;
  * CRITICAL criterion has EXECUTED (not merely ASSERTED) evidence; and the implementation
  * diff touched only files the impact analysis predicted, reporting any unpredicted file
  * by name rather than silently accepting it.
+ *
+ * Reads both the acceptance criteria and the evidence from a live {@link WorkflowState}
+ * rather than frozen constructor snapshots, since a registry-registered executor (the
+ * real CLI, wired once before any node runs) is constructed before REQUIREMENT has even
+ * produced a real requirement spec, let alone before TEST has produced any evidence.
+ * Reading both at {@link #execute} time, not construction time, is what lets one executor
+ * instance see the run's real, current requirement (including after a spec 06 re-plan
+ * amends it) and TEST's real evidence once TEST has actually completed.
  */
 public final class ValidateExecutor implements NodeExecutor {
 
     private static final Pattern DIFF_FILE_HEADER = Pattern.compile("^--- a/(.+)$", Pattern.MULTILINE);
 
     private final Path artifactsDirectory;
-    private final List<AcceptanceCriterion> acceptanceCriteria;
-    private final List<Evidence> evidence;
+    private final WorkflowState workflowState;
     private final Path impactJsonPath;
     private final Path implementationDiffPath;
 
-    public ValidateExecutor(Path artifactsDirectory, List<AcceptanceCriterion> acceptanceCriteria,
-                             List<Evidence> evidence, Path impactJsonPath, Path implementationDiffPath) {
+    public ValidateExecutor(Path artifactsDirectory, WorkflowState workflowState, Path impactJsonPath,
+                             Path implementationDiffPath) {
         this.artifactsDirectory = artifactsDirectory;
-        this.acceptanceCriteria = acceptanceCriteria;
-        this.evidence = evidence;
+        this.workflowState = workflowState;
         this.impactJsonPath = impactJsonPath;
         this.implementationDiffPath = implementationDiffPath;
     }
@@ -50,6 +57,8 @@ public final class ValidateExecutor implements NodeExecutor {
     @Override
     public ExecutionOutput execute(WorkflowNode node, Map<String, Object> context) {
         List<String> findings = new ArrayList<>();
+        List<AcceptanceCriterion> acceptanceCriteria = workflowState.getRequirementSpec().acceptanceCriteria();
+        List<Evidence> evidence = workflowState.getEvidence();
 
         List<AcceptanceCriterion> criteriaWithoutPassingEvidence = acceptanceCriteria.stream()
             .filter(criterion -> evidence.stream().noneMatch(
@@ -94,7 +103,7 @@ public final class ValidateExecutor implements NodeExecutor {
         writeFile(reportPath, buildValidationReport(validationPassed, findings));
 
         Path matrixPath = artifactsDirectory.resolve("traceability-matrix.md");
-        writeFile(matrixPath, buildTraceabilityMatrix());
+        writeFile(matrixPath, buildTraceabilityMatrix(acceptanceCriteria, evidence));
 
         Map<String, Object> outputs = new java.util.LinkedHashMap<>();
         outputs.put("artifactPath", reportPath.toString());
@@ -171,7 +180,7 @@ public final class ValidateExecutor implements NodeExecutor {
         return report.toString();
     }
 
-    private String buildTraceabilityMatrix() {
+    private String buildTraceabilityMatrix(List<AcceptanceCriterion> acceptanceCriteria, List<Evidence> evidence) {
         StringBuilder matrix = new StringBuilder();
         matrix.append("# Traceability matrix\n\n");
         matrix.append("| Criterion | Evidence | Origin | Passed | Artifact |\n");

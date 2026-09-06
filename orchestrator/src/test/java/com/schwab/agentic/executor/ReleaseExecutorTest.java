@@ -25,20 +25,33 @@ import java.util.Set;
  */
 public class ReleaseExecutorTest {
 
-    private static WorkflowState newState() {
+    /**
+     * {@code validationPassed} controls whether VALIDATE is driven to COMPLETED (a real
+     * transition through RUNNING first, since PENDING -> COMPLETED is not a legal edge)
+     * or left at FAILED, standing in for what a real VALIDATE node's own exit gate would
+     * have decided before RELEASE ever runs. {@link ReleaseExecutor} reads this back via
+     * {@code workflowState.getStatus("VALIDATE")}, never a constructor argument, exactly
+     * as the real CLI's registry-registered instance would.
+     */
+    private static WorkflowState newState(boolean validationPassed) {
         WorkflowNode approvalNode = new WorkflowNode("IMPLEMENT", "Implementation", "implement", Set.of(),
             null, null, RiskLevel.HIGH, 1, Set.of());
         RequirementSpec requirementSpec = new RequirementSpec(
             "REQ-1", 1, "req", "req normalized",
             List.of(new AcceptanceCriterion("AC-1", "criterion", RiskLevel.LOW)));
-        return new WorkflowState("RUN-1", requirementSpec, List.of(approvalNode));
+        WorkflowState state = new WorkflowState("RUN-1", requirementSpec,
+            List.of(approvalNode, TestExecutorFixtures.validateNode()));
+        state.transition("VALIDATE", NodeStatus.RUNNING, "test", "starting VALIDATE");
+        state.transition("VALIDATE", validationPassed ? NodeStatus.COMPLETED : NodeStatus.FAILED, "test",
+            validationPassed ? "validation passed" : "validation failed");
+        return state;
     }
 
     public void testValidationPassedNoDenialsNoApprovalsNeededIsReleaseReady() throws IOException {
         Path artifactsDir = Files.createTempDirectory("executor-artifacts-release-1");
-        WorkflowState state = newState();
+        WorkflowState state = newState(true);
 
-        ReleaseExecutor executor = new ReleaseExecutor(artifactsDir, true, state.getAuditLog());
+        ReleaseExecutor executor = new ReleaseExecutor(artifactsDir, state);
         NodeExecutor.ExecutionOutput output = executor.execute(TestExecutorFixtures.releaseNode(), Map.of());
 
         assertTrue(output.executorReportedSuccess(), "with no denials and no pending approvals, release must be ready");
@@ -46,9 +59,9 @@ public class ReleaseExecutorTest {
 
     public void testValidationFailedBlocksRelease() throws IOException {
         Path artifactsDir = Files.createTempDirectory("executor-artifacts-release-2");
-        WorkflowState state = newState();
+        WorkflowState state = newState(false);
 
-        ReleaseExecutor executor = new ReleaseExecutor(artifactsDir, false, state.getAuditLog());
+        ReleaseExecutor executor = new ReleaseExecutor(artifactsDir, state);
         NodeExecutor.ExecutionOutput output = executor.execute(TestExecutorFixtures.releaseNode(), Map.of());
 
         assertTrue(!output.executorReportedSuccess(), "release must not be ready when validation failed");
@@ -58,11 +71,11 @@ public class ReleaseExecutorTest {
 
     public void testPolicyDenialInAuditLogBlocksRelease() throws IOException {
         Path artifactsDir = Files.createTempDirectory("executor-artifacts-release-3");
-        WorkflowState state = newState();
+        WorkflowState state = newState(true);
         state.record(AuditEvent.EventType.POLICY_DENIED, "IMPLEMENT", "policy", "risk too high for auto-approval",
             Map.of());
 
-        ReleaseExecutor executor = new ReleaseExecutor(artifactsDir, true, state.getAuditLog());
+        ReleaseExecutor executor = new ReleaseExecutor(artifactsDir, state);
         NodeExecutor.ExecutionOutput output = executor.execute(TestExecutorFixtures.releaseNode(), Map.of());
 
         assertTrue(!output.executorReportedSuccess(), "a recorded policy denial must block release");
@@ -73,10 +86,10 @@ public class ReleaseExecutorTest {
 
     public void testNodeThatEnteredWaitingApprovalWithNoGrantedEventBlocksRelease() throws IOException {
         Path artifactsDir = Files.createTempDirectory("executor-artifacts-release-4");
-        WorkflowState state = newState();
+        WorkflowState state = newState(true);
         state.transition("IMPLEMENT", NodeStatus.WAITING_APPROVAL, "policy", "high risk node requires approval");
 
-        ReleaseExecutor executor = new ReleaseExecutor(artifactsDir, true, state.getAuditLog());
+        ReleaseExecutor executor = new ReleaseExecutor(artifactsDir, state);
         NodeExecutor.ExecutionOutput output = executor.execute(TestExecutorFixtures.releaseNode(), Map.of());
 
         assertTrue(!output.executorReportedSuccess(),
@@ -93,12 +106,12 @@ public class ReleaseExecutorTest {
      */
     public void testNodeThatEnteredWaitingApprovalAndWasGrantedApprovalDoesNotBlockRelease() throws IOException {
         Path artifactsDir = Files.createTempDirectory("executor-artifacts-release-5");
-        WorkflowState state = newState();
+        WorkflowState state = newState(true);
         state.transition("IMPLEMENT", NodeStatus.WAITING_APPROVAL, "policy", "high risk node requires approval");
         state.record(AuditEvent.EventType.APPROVAL_GRANTED, "IMPLEMENT", "human:reviewer",
             "approved after manual review", Map.of());
 
-        ReleaseExecutor executor = new ReleaseExecutor(artifactsDir, true, state.getAuditLog());
+        ReleaseExecutor executor = new ReleaseExecutor(artifactsDir, state);
         NodeExecutor.ExecutionOutput output = executor.execute(TestExecutorFixtures.releaseNode(), Map.of());
 
         assertTrue(output.executorReportedSuccess(),

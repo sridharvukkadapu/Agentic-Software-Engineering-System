@@ -211,7 +211,7 @@ public final class Gates {
                     }
                     if (!openQuestions.isEmpty()) {
                         return Result.fail("open-questions.json declares " + openQuestions.size()
-                            + " unresolved question(s) the requirement does not answer: " + openQuestionsPath
+                            + " unresolved question(s) the requirement does not answer: " + openQuestions
                             + ". The requirement executor does not invent a policy to fill this gap.");
                     }
                 }

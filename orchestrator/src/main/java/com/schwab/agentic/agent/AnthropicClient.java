@@ -74,6 +74,7 @@ public final class AnthropicClient implements AgentClient {
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("content-type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+            .timeout(java.time.Duration.ofMinutes(5))
             .build();
 
         Instant start = Instant.now();

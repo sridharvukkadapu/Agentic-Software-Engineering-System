@@ -4,6 +4,7 @@ import com.schwab.agentic.engine.NodeExecutor;
 import com.schwab.agentic.model.AuditEvent;
 import com.schwab.agentic.model.NodeStatus;
 import com.schwab.agentic.model.WorkflowNode;
+import com.schwab.agentic.model.WorkflowState;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
@@ -32,22 +33,29 @@ import java.util.Set;
  *     which asked for approval also received one, derived from the audit log rather than
  *     asserted.
  * </ul>
+ *
+ * Reads {@code validationPassed} and the audit log from a live {@link WorkflowState}
+ * rather than frozen constructor arguments, since a registry-registered executor (the
+ * real CLI) is constructed before VALIDATE has run at all; checking whether the VALIDATE
+ * node's status is COMPLETED at {@link #execute} time is exactly the "VALIDATE node's
+ * exit gate outcome" this class has always meant to check, just read live instead of
+ * pre-computed.
  */
 public final class ReleaseExecutor implements NodeExecutor {
 
     private final Path artifactsDirectory;
-    private final boolean validationPassed;
-    private final List<AuditEvent> auditLog;
+    private final WorkflowState workflowState;
 
-    public ReleaseExecutor(Path artifactsDirectory, boolean validationPassed, List<AuditEvent> auditLog) {
+    public ReleaseExecutor(Path artifactsDirectory, WorkflowState workflowState) {
         this.artifactsDirectory = artifactsDirectory;
-        this.validationPassed = validationPassed;
-        this.auditLog = auditLog;
+        this.workflowState = workflowState;
     }
 
     @Override
     public ExecutionOutput execute(WorkflowNode node, Map<String, Object> context) {
         List<String> findings = new ArrayList<>();
+        List<AuditEvent> auditLog = workflowState.getAuditLog();
+        boolean validationPassed = workflowState.getStatus("VALIDATE") == NodeStatus.COMPLETED;
 
         if (!validationPassed) {
             findings.add("validation did not pass");

@@ -35,6 +35,16 @@ public final class ImplementExecutor implements NodeExecutor {
         You are a software engineer implementing a design specification as real Java
         source code for an existing project.
 
+        The project's compile classpath contains only the JDK standard library and
+        whatever the project's own build file already declares as dependencies: Spring
+        Boot (web, data-jpa, validation), Flyway (core and the PostgreSQL database
+        support module), and their transitive dependencies. It does NOT contain Caffeine,
+        Jsoup, Guava, Apache Commons, Redis or spring-data-redis, or any other library not
+        already declared. If your design needs a capability one of those would normally
+        provide (an HTML parser, a cache with eviction, and so on), implement it directly
+        with the JDK standard library and Spring's own facilities rather than importing a
+        dependency that is not actually present.
+
         For each file you write or change, respond with a separate fenced code block.
         The first line inside the fence must be a comment giving the file's path
         relative to the project root, exactly like this:
@@ -66,7 +76,7 @@ public final class ImplementExecutor implements NodeExecutor {
     @Override
     public ExecutionOutput execute(WorkflowNode node, Map<String, Object> context) {
         String userPrompt = buildUserPrompt(context);
-        AgentResponse response = agentClient.call(new AgentRequest(SYSTEM_PROMPT, userPrompt, 4000, node.id()));
+        AgentResponse response = agentClient.call(new AgentRequest(SYSTEM_PROMPT, userPrompt, 8000, node.id()));
 
         List<ResponseParser.CodeBlock> blocks = ResponseParser.extractFencedBlocks(response.text());
         List<FileWrite> fileWrites = extractFileWrites(blocks);
@@ -118,6 +128,12 @@ public final class ImplementExecutor implements NodeExecutor {
         prompt.append("Implement the design spec below as real, complete Java source files.\n\n");
         if (context.containsKey("designSpec")) {
             prompt.append("Design spec:\n").append(context.get("designSpec")).append("\n\n");
+        }
+        if (context.containsKey("existingCodeContext")) {
+            prompt.append("The real, existing source of every file the impact analysis named as affected")
+                .append(" (use exactly these package names, class names, method signatures, and constructors")
+                .append(" when referencing them; do not guess or invent a different package):\n")
+                .append(context.get("existingCodeContext")).append("\n\n");
         }
         if (context.containsKey("previousFailureReason")) {
             prompt.append("The previous attempt failed to compile with this output:\n")

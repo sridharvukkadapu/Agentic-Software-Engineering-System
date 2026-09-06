@@ -10,6 +10,7 @@ import com.schwab.agentic.engine.Gates;
 import com.schwab.agentic.engine.NodeExecutor;
 import com.schwab.agentic.model.AcceptanceCriterion;
 import com.schwab.agentic.model.Evidence;
+import com.schwab.agentic.model.NodeStatus;
 import com.schwab.agentic.model.RequirementSpec;
 import com.schwab.agentic.model.RiskLevel;
 import com.schwab.agentic.model.WorkflowNode;
@@ -486,18 +487,25 @@ public class GreenfieldEndToEndTest {
         assertTrue(documentOutput.executorReportedSuccess(), "DOCUMENT must succeed: " + documentOutput.summary());
 
         // --- 7. VALIDATE (no agent call) ---
-        ValidateExecutor validateExecutor = new ValidateExecutor(artifactsDir,
-            requirementSpecWithCriterion.acceptanceCriteria(), allEvidence,
+        WorkflowNode validateNode = gatedNode("VALIDATE", "evidence-complete", RiskLevel.HIGH, Set.of());
+        WorkflowNode releaseNode = gatedNode("RELEASE", "executed-evidence-for-high-risk", RiskLevel.CRITICAL, Set.of());
+        WorkflowState pipelineState = new WorkflowState("FULL-PIPELINE-VALIDATE-RELEASE", requirementSpecWithCriterion,
+            List.of(validateNode, releaseNode));
+        for (Evidence item : allEvidence) {
+            pipelineState.addEvidence(item);
+        }
+
+        ValidateExecutor validateExecutor = new ValidateExecutor(artifactsDir, pipelineState,
             artifactsDir.resolve("impact.json"), implementResult.artifactsDir().resolve("implementation.diff"));
-        NodeExecutor.ExecutionOutput validateOutput = validateExecutor.execute(
-            gatedNode("VALIDATE", "evidence-complete", RiskLevel.HIGH, Set.of()), Map.of());
+        NodeExecutor.ExecutionOutput validateOutput = validateExecutor.execute(validateNode, Map.of());
         assertTrue(validateOutput.executorReportedSuccess(), "VALIDATE must pass for real: " + validateOutput.summary());
 
+        pipelineState.transition("VALIDATE", NodeStatus.RUNNING, "test", "starting VALIDATE");
+        pipelineState.transition("VALIDATE", NodeStatus.COMPLETED, "test", "VALIDATE passed for real");
+
         // --- 8. RELEASE (no agent call) ---
-        List<com.schwab.agentic.model.AuditEvent> auditLog = testState.getAuditLog();
-        ReleaseExecutor releaseExecutor = new ReleaseExecutor(artifactsDir, validateOutput.executorReportedSuccess(), auditLog);
-        NodeExecutor.ExecutionOutput releaseOutput = releaseExecutor.execute(
-            gatedNode("RELEASE", "executed-evidence-for-high-risk", RiskLevel.CRITICAL, Set.of()), Map.of());
+        ReleaseExecutor releaseExecutor = new ReleaseExecutor(artifactsDir, pipelineState);
+        NodeExecutor.ExecutionOutput releaseOutput = releaseExecutor.execute(releaseNode, Map.of());
 
         assertTrue(releaseOutput.executorReportedSuccess(),
             "the full greenfield pipeline must reach a real RELEASE COMPLETED outcome: " + releaseOutput.summary());

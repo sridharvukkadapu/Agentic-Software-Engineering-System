@@ -11,8 +11,15 @@ import com.schwab.agentic.engine.PolicyConfig;
 import com.schwab.agentic.engine.RealPolicyEngine;
 import com.schwab.agentic.engine.Replanner;
 import com.schwab.agentic.engine.WorkflowEngine;
+import com.schwab.agentic.executor.DesignExecutor;
 import com.schwab.agentic.executor.DocumentExecutor;
+import com.schwab.agentic.executor.ImpactExecutor;
+import com.schwab.agentic.executor.ImplementExecutor;
+import com.schwab.agentic.executor.ImplementationSourceReader;
+import com.schwab.agentic.executor.ReleaseExecutor;
 import com.schwab.agentic.executor.RequirementExecutor;
+import com.schwab.agentic.executor.TestExecutor;
+import com.schwab.agentic.executor.ValidateExecutor;
 import com.schwab.agentic.graph.WorkflowGraph;
 import com.schwab.agentic.json.Json;
 import com.schwab.agentic.model.AcceptanceCriterion;
@@ -28,24 +35,29 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * The orchestrator's command-line entry point: {@code run}, {@code resume}, and
- * {@code approve} are real, wired to the real executor registry and a real
- * {@link WorkflowEngine}. {@code amend} (spec 06's re-planning) and {@code report}
- * (spec 08's reporting) are declared here as named subcommands so the CLI surface spec 05
- * describes exists, but each prints that it is not yet implemented rather than faking a
- * result, since building either out for real belongs to its own later spec.
+ * The orchestrator's command-line entry point: {@code run}, {@code resume},
+ * {@code approve}, and {@code amend} are real, wired to the real executor registry (all
+ * eight spec-04 executors, not a subset) and a real {@link WorkflowEngine}. {@code report}
+ * (spec 08's reporting) is declared as a named subcommand so the CLI surface exists, but
+ * prints that it is not yet implemented rather than faking a result.
  *
- * This class deliberately runs against a small demo workflow
- * ({@code workflows/approval-demo.json}), not the full eight-node
- * {@code sdlc-default.json}: the full pipeline needs each stage's real output threaded
- * into the next stage's context (a real design spec into ImplementExecutor, a real diff
- * into DocumentExecutor), which today only happens by hand in the fixture-recording tool,
- * not inside {@link WorkflowEngine} itself. Building that cross-node context-threading
- * layer is a materially different, larger piece of work than spec 05 asks for; this CLI
- * proves the real thing spec 05 is actually about, persistence and resume across a real
- * process boundary, against two real executors (RequirementExecutor and DocumentExecutor,
- * both spec 04's real implementations, not a stand-in), rather than against the full
- * pipeline before the engine has anywhere to put a later stage's real input.
+ * {@code buildEngine} registers every node id {@code sdlc-default.json} declares:
+ * requirement, impact, design, implement, test, document, validate, release. A workflow
+ * naming an executor this registry never registered fails at
+ * {@link WorkflowEngine}'s own startup validation, before any node runs, naming the
+ * offending node and executor.
+ *
+ * Cross-node context threading (D6's long-standing open item) is real here: each of
+ * IMPACT, DESIGN, TEST, and DOCUMENT reads its upstream input from the real artifact file
+ * its dependency actually wrote under {@code runs/<runId>/artifacts/}, via
+ * {@link WorkflowEngine#withInitialContext}'s lazy supplier, which is only invoked at the
+ * moment that node's own first attempt starts (by which point the dependency has
+ * genuinely completed). Disk is the contract: no executor output is ever handed to
+ * another executor by direct in-memory reference. VALIDATE and RELEASE read the run's
+ * live evidence, requirement, and audit log directly off the {@link WorkflowState}
+ * instance the engine itself holds, since both need to see facts (TEST's real evidence,
+ * VALIDATE's real outcome) that do not exist yet when the registry is built, before any
+ * node has executed.
  */
 public final class Main {
 
@@ -79,8 +91,8 @@ public final class Main {
     private static void printUsageAndExit() {
         System.err.println("""
             Usage:
-              run --workflow <path> --requirement <path> [--live | --replay] [--auto-approve] [--fixtures <dir>] [--runs <dir>] [--run-id <id>]
-              resume --run-id <id> [--workflow <path>] [--live | --replay] [--fixtures <dir>] [--runs <dir>]
+              run --workflow <path> --requirement <path> [--live | --replay] [--auto-approve] [--fixtures <dir>] [--runs <dir>] [--run-id <id>] [--target-service <path>] [--build-command <cmd>] [--test-command <cmd>]
+              resume --run-id <id> [--workflow <path>] [--live | --replay] [--fixtures <dir>] [--runs <dir>] [--target-service <path>] [--build-command <cmd>] [--test-command <cmd>]
               approve --run-id <id> <nodeId> --by "<name>" --reason "<text>" [--runs <dir>]
               amend --run-id <id> --requirement <file> [--workflow <path>] [--target-service <path>] [--runs <dir>] [--fixtures <dir>]
               report: not yet implemented (spec 08)
@@ -88,14 +100,21 @@ public final class Main {
         System.exit(2);
     }
 
+    private static final String DEFAULT_WORKFLOW = "workflows/sdlc-default.json";
+    private static final String DEFAULT_BUILD_COMMAND = "./gradlew compileJava";
+    private static final String DEFAULT_TEST_COMMAND = "./gradlew test";
+
     // ---- run ----
 
     private static void runCommand(String[] args) {
         CliArgs cliArgs = CliArgs.parse(args);
-        Path workflowPath = cliArgs.requirePath("--workflow");
+        Path workflowPath = cliArgs.pathOrDefault("--workflow", Path.of(DEFAULT_WORKFLOW));
         Path requirementPath = cliArgs.requirePath("--requirement");
         Path runsDirectory = cliArgs.pathOrDefault("--runs", Path.of("runs"));
         Path fixturesDirectory = cliArgs.pathOrDefault("--fixtures", Path.of("fixtures"));
+        Path targetServiceDirectory = cliArgs.pathOrDefault("--target-service", Path.of("target-service"));
+        String buildCommand = cliArgs.valueOrDefault("--build-command", DEFAULT_BUILD_COMMAND);
+        String testCommand = cliArgs.valueOrDefault("--test-command", DEFAULT_TEST_COMMAND);
         boolean live = cliArgs.hasFlag("--live");
         boolean autoApprove = cliArgs.hasFlag("--auto-approve");
         String runId = cliArgs.valueOrDefault("--run-id", "RUN-" + System.currentTimeMillis());
@@ -111,10 +130,10 @@ public final class Main {
             List.<AcceptanceCriterion>of());
         WorkflowState state = new WorkflowState(runId, placeholderSpec, graph.getAllNodes());
 
-        WorkflowEngine engine = buildEngine(graph, state, runsDirectory, fixturesDirectory, live, autoApprove,
-            new ApprovalStore());
+        WorkflowEngine engine = buildEngine(graph, state, runsDirectory, fixturesDirectory, targetServiceDirectory,
+            buildCommand, testCommand, live, autoApprove, new ApprovalStore());
         engine.withInitialContext("REQUIREMENT", Map.of("requirementPath", requirementPath.toString()));
-        seedDocumentContextFromRealRequirementArtifact(engine, runsDirectory, runId);
+        seedCrossNodeContext(engine, runsDirectory, runId, targetServiceDirectory);
 
         System.out.println("Starting run " + runId + " (" + (live ? "LIVE" : "REPLAY")
             + (autoApprove ? ", auto-approve" : "") + ")");
@@ -123,29 +142,148 @@ public final class Main {
     }
 
     /**
-     * DOCUMENT has no upstream design or implementation stage in this small demo
-     * workflow (see this class's own javadoc on why). Seeded lazily: the supplier is
-     * only called at the moment DOCUMENT's own first attempt actually starts, by which
-     * point REQUIREMENT (its declared dependency) has genuinely completed and written
-     * its real requirement-spec.json, giving DocumentExecutor real content to document
-     * instead of an empty context a real model correctly refuses to fabricate
-     * documentation from (found by running this CLI live: the real model's response to
-     * an empty context was to ask for the missing design spec and diff, exactly as it
-     * should).
+     * Wires every real dependency-to-dependent context key threading spec 04's own
+     * executors read from {@code context}, each a lazy supplier read from the real
+     * artifact its upstream dependency wrote to {@code runs/<runId>/artifacts/}. Called
+     * for both {@code run} and {@code resume}: a resumed run re-enters the same
+     * scheduling loop, so a node whose dependency has not run yet in this process still
+     * needs its supplier registered before the engine's first pass.
      */
-    private static void seedDocumentContextFromRealRequirementArtifact(WorkflowEngine engine, Path runsDirectory,
-                                                                        String runId) {
-        Path requirementSpecPath = runsDirectory.resolve(runId).resolve("artifacts").resolve("requirement-spec.json");
-        engine.withInitialContext("DOCUMENT", () -> {
-            if (!Files.isRegularFile(requirementSpecPath)) {
-                return Map.of();
-            }
-            try {
-                return Map.of("designSpec", Files.readString(requirementSpecPath));
-            } catch (IOException e) {
-                throw new IllegalStateException("Failed to read " + requirementSpecPath, e);
-            }
+    private static void seedCrossNodeContext(WorkflowEngine engine, Path runsDirectory, String runId,
+                                              Path targetServiceDirectory) {
+        Path artifactsDirectory = runsDirectory.resolve(runId).resolve("artifacts");
+
+        engine.withInitialContext("IMPACT", () -> {
+            String normalizedProblem = readJsonField(artifactsDirectory.resolve("requirement-spec.json"),
+                "normalizedProblem");
+            return normalizedProblem == null ? Map.of() : Map.of("normalizedProblem", normalizedProblem);
         });
+
+        engine.withInitialContext("DESIGN", () -> {
+            Map<String, Object> context = new java.util.LinkedHashMap<>();
+            String normalizedProblem = readJsonField(artifactsDirectory.resolve("requirement-spec.json"),
+                "normalizedProblem");
+            if (normalizedProblem != null) {
+                context.put("normalizedProblem", normalizedProblem);
+            }
+            Path impactMarkdownPath = artifactsDirectory.resolve("impact-analysis.md");
+            if (Files.isRegularFile(impactMarkdownPath)) {
+                context.put("impactSummary", readFileQuietly(impactMarkdownPath));
+            }
+            return context;
+        });
+
+        engine.withInitialContext("IMPLEMENT", () -> {
+            Map<String, Object> context = new java.util.LinkedHashMap<>();
+            Path designSpecPath = artifactsDirectory.resolve("design-spec.json");
+            if (Files.isRegularFile(designSpecPath)) {
+                context.put("designSpec", readFileQuietly(designSpecPath));
+            }
+            String existingCodeContext = readAffectedFilesContent(
+                artifactsDirectory.resolve("impact.json"), targetServiceDirectory);
+            if (existingCodeContext != null) {
+                context.put("existingCodeContext", existingCodeContext);
+            }
+            return context;
+        });
+
+        engine.withInitialContext("TEST", () -> {
+            Map<String, Object> context = new java.util.LinkedHashMap<>();
+            Path designSpecPath = artifactsDirectory.resolve("design-spec.json");
+            if (Files.isRegularFile(designSpecPath)) {
+                context.put("designSpec", readFileQuietly(designSpecPath));
+            }
+            Path implementationDiffPath = artifactsDirectory.resolve("implementation.diff");
+            context.put("implementationSource",
+                ImplementationSourceReader.readFromDiff(targetServiceDirectory, implementationDiffPath));
+            List<Object> criteria = readAcceptanceCriteriaAsContextList(
+                artifactsDirectory.resolve("requirement-spec.json"));
+            if (!criteria.isEmpty()) {
+                context.put("acceptanceCriteria", criteria);
+            }
+            return context;
+        });
+
+        engine.withInitialContext("DOCUMENT", () -> {
+            Map<String, Object> context = new java.util.LinkedHashMap<>();
+            Path designSpecPath = artifactsDirectory.resolve("design-spec.json");
+            Path requirementSpecPath = artifactsDirectory.resolve("requirement-spec.json");
+            if (Files.isRegularFile(designSpecPath)) {
+                context.put("designSpec", readFileQuietly(designSpecPath));
+            } else if (Files.isRegularFile(requirementSpecPath)) {
+                // The two-node approval-demo.json workflow has no DESIGN node at all:
+                // DOCUMENT depends directly on REQUIREMENT, so there is no real
+                // design-spec.json for it to read. Falling back to REQUIREMENT's own
+                // real requirement-spec.json is what lets DocumentExecutor document
+                // something real rather than an empty context a real model correctly
+                // refuses to fabricate documentation from (found by running this CLI
+                // live against approval-demo.json during spec 05).
+                context.put("designSpec", readFileQuietly(requirementSpecPath));
+            }
+            Path implementationDiffPath = artifactsDirectory.resolve("implementation.diff");
+            if (Files.isRegularFile(implementationDiffPath)) {
+                context.put("implementationDiff", readFileQuietly(implementationDiffPath));
+            }
+            return context;
+        });
+    }
+
+    @SuppressWarnings("unchecked")
+    private static String readJsonField(Path jsonPath, String field) {
+        if (!Files.isRegularFile(jsonPath)) {
+            return null;
+        }
+        Map<String, Object> parsed = (Map<String, Object>) Json.parse(readFileQuietly(jsonPath));
+        Object value = parsed.get(field);
+        return value == null ? null : String.valueOf(value);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<Object> readAcceptanceCriteriaAsContextList(Path requirementSpecPath) {
+        if (!Files.isRegularFile(requirementSpecPath)) {
+            return List.of();
+        }
+        Map<String, Object> parsed = (Map<String, Object>) Json.parse(readFileQuietly(requirementSpecPath));
+        Object criteria = parsed.get("acceptanceCriteria");
+        return criteria instanceof List<?> list ? new ArrayList<>(list) : List.of();
+    }
+
+    /**
+     * The real content of every file {@code impact.json} named under {@code affectedFiles}
+     * (existing target-service classes the impact analysis found this change depends on),
+     * so IMPLEMENT can be told the real package names, class names, and method signatures
+     * of code it must reference, rather than guessing at them the way an implementation
+     * that only ever sees an abstract design spec is forced to.
+     */
+    @SuppressWarnings("unchecked")
+    private static String readAffectedFilesContent(Path impactJsonPath, Path targetServiceDirectory) {
+        if (!Files.isRegularFile(impactJsonPath)) {
+            return null;
+        }
+        Map<String, Object> parsed = (Map<String, Object>) Json.parse(readFileQuietly(impactJsonPath));
+        Object affectedFiles = parsed.get("affectedFiles");
+        if (!(affectedFiles instanceof List<?> list) || list.isEmpty()) {
+            return null;
+        }
+        StringBuilder combined = new StringBuilder();
+        for (Object item : list) {
+            String relativePath = String.valueOf(item);
+            Path absolute = targetServiceDirectory.resolve(relativePath);
+            if (!Files.isRegularFile(absolute)) {
+                continue;
+            }
+            combined.append("// FILE: ").append(relativePath).append('\n');
+            combined.append(readFileQuietly(absolute)).append("\n\n");
+        }
+        return combined.length() == 0 ? null : combined.toString();
+    }
+
+    private static String readFileQuietly(Path path) {
+        try {
+            return Files.readString(path);
+        } catch (IOException e) {
+            throw new java.io.UncheckedIOException("Failed to read " + path, e);
+        }
     }
 
     // ---- resume ----
@@ -155,8 +293,11 @@ public final class Main {
         String runId = cliArgs.requireValue("--run-id");
         Path runsDirectory = cliArgs.pathOrDefault("--runs", Path.of("runs"));
         Path fixturesDirectory = cliArgs.pathOrDefault("--fixtures", Path.of("fixtures"));
+        Path targetServiceDirectory = cliArgs.pathOrDefault("--target-service", Path.of("target-service"));
+        String buildCommand = cliArgs.valueOrDefault("--build-command", DEFAULT_BUILD_COMMAND);
+        String testCommand = cliArgs.valueOrDefault("--test-command", DEFAULT_TEST_COMMAND);
         boolean live = cliArgs.hasFlag("--live");
-        Path workflowPath = cliArgs.pathOrDefault("--workflow", Path.of("workflows/approval-demo.json"));
+        Path workflowPath = cliArgs.pathOrDefault("--workflow", Path.of(DEFAULT_WORKFLOW));
 
         Path statePath = runsDirectory.resolve(runId).resolve("state.json");
         if (!Files.isRegularFile(statePath)) {
@@ -180,8 +321,9 @@ public final class Main {
             "run resumed after " + statusBeforeResume + ", pause duration " + pauseDuration,
             Map.of("previousStatus", statusBeforeResume.name(), "pauseDurationMillis", (double) pauseDuration.toMillis()));
 
-        WorkflowEngine engine = buildEngine(graph, state, runsDirectory, fixturesDirectory, live, false, approvalStore);
-        seedDocumentContextFromRealRequirementArtifact(engine, runsDirectory, runId);
+        WorkflowEngine engine = buildEngine(graph, state, runsDirectory, fixturesDirectory, targetServiceDirectory,
+            buildCommand, testCommand, live, false, approvalStore);
+        seedCrossNodeContext(engine, runsDirectory, runId, targetServiceDirectory);
 
         System.out.println("Resuming run " + runId + " (was " + statusBeforeResume + ")");
         WorkflowStatus outcome = engine.run();
@@ -205,7 +347,7 @@ public final class Main {
         String approver = cliArgs.requireValue("--by");
         String reason = cliArgs.requireValue("--reason");
         Path runsDirectory = cliArgs.pathOrDefault("--runs", Path.of("runs"));
-        Path workflowPath = cliArgs.pathOrDefault("--workflow", Path.of("workflows/approval-demo.json"));
+        Path workflowPath = cliArgs.pathOrDefault("--workflow", Path.of(DEFAULT_WORKFLOW));
 
         Path statePath = runsDirectory.resolve(runId).resolve("state.json");
         if (!Files.isRegularFile(statePath)) {
@@ -220,7 +362,8 @@ public final class Main {
 
         WorkflowGraph graph = WorkflowGraph.loadFromFile(workflowPath);
         ApprovalStore approvalStore = ApprovalStore.loadFromFile(runsDirectory, runId);
-        WorkflowEngine engine = buildEngine(graph, state, runsDirectory, Path.of("fixtures"), false, false, approvalStore);
+        WorkflowEngine engine = buildEngine(graph, state, runsDirectory, Path.of("fixtures"),
+            Path.of("target-service"), DEFAULT_BUILD_COMMAND, DEFAULT_TEST_COMMAND, false, false, approvalStore);
 
         engine.approve(nodeId, approver, reason);
         System.out.println("Approved " + nodeId + " for run " + runId + " by " + approver);
@@ -247,7 +390,7 @@ public final class Main {
         Path amendedRequirementPath = cliArgs.requirePath("--requirement");
         Path runsDirectory = cliArgs.pathOrDefault("--runs", Path.of("runs"));
         Path fixturesDirectory = cliArgs.pathOrDefault("--fixtures", Path.of("fixtures"));
-        Path workflowPath = cliArgs.pathOrDefault("--workflow", Path.of("workflows/approval-demo.json"));
+        Path workflowPath = cliArgs.pathOrDefault("--workflow", Path.of(DEFAULT_WORKFLOW));
         Path targetServiceDirectory = cliArgs.pathOrDefault("--target-service", null);
         boolean live = cliArgs.hasFlag("--live");
 
@@ -325,23 +468,69 @@ public final class Main {
 
     // ---- shared wiring ----
 
+    /**
+     * Registers all eight spec-04 executors under the executor names
+     * {@code sdlc-default.json} declares, so this registry can run the real, full SDLC
+     * pipeline, not only the two-node demo workflow spec 05 introduced. VALIDATE and
+     * RELEASE are given the live {@code state} instance itself rather than pre-computed
+     * arguments, since both are registered here, before any node has run, and each needs
+     * to read facts (evidence, the VALIDATE node's real outcome) that only exist once
+     * earlier nodes have actually executed.
+     */
     private static WorkflowEngine buildEngine(WorkflowGraph graph, WorkflowState state, Path runsDirectory,
-                                               Path fixturesDirectory, boolean live, boolean autoApprove,
-                                               ApprovalStore approvalStore) {
+                                               Path fixturesDirectory, Path targetServiceDirectory,
+                                               String buildCommand, String testCommand, boolean live,
+                                               boolean autoApprove, ApprovalStore approvalStore) {
         NodeExecutorRegistry registry = new NodeExecutorRegistry();
         Path artifactsDirectory = runsDirectory.resolve(state.getRunId()).resolve("artifacts");
+        String runId = state.getRunId();
 
+        // cli/requirement and greenfield/requirement were both recorded live against the
+        // exact same real request (same requirement.md text, same maxTokens), so they
+        // share a request hash, but a real model's output is not deterministic across
+        // two separate live calls: their real recorded responses differ. cli/requirement
+        // is used here since it is the one MainCliResumeTest (approval-demo.json's own
+        // test) depends on; it is equally valid content for the same real request.
         AgentClient requirementClient = agentClientFor(live, fixturesDirectory.resolve("cli").resolve("requirement"), state);
         registry.register("requirement", new RequirementExecutor(requirementClient, artifactsDirectory));
 
+        AgentClient impactClient = agentClientFor(live, fixturesDirectory.resolve("greenfield").resolve("impact"), state);
+        registry.register("impact", new ImpactExecutor(impactClient, artifactsDirectory, targetServiceDirectory));
+
+        AgentClient designClient = agentClientFor(live, fixturesDirectory.resolve("greenfield").resolve("design"), state);
+        registry.register("design", new DesignExecutor(designClient, artifactsDirectory, state::addDecision));
+
+        AgentClient implementClient = agentClientFor(live, fixturesDirectory.resolve("greenfield").resolve("implement"), state);
+        registry.register("implement", new ImplementExecutor(implementClient, targetServiceDirectory, artifactsDirectory));
+
+        AgentClient testClient = agentClientFor(live, fixturesDirectory.resolve("greenfield").resolve("test"), state);
+        registry.register("test", new TestExecutor(testClient, new CommandRunner(), targetServiceDirectory,
+            artifactsDirectory, runsDirectory, runId, testCommand, state::addEvidence, state));
+
+        // approval-demo.json's DOCUMENT depends directly on REQUIREMENT (no DESIGN node
+        // exists in that graph at all) and gets REQUIREMENT's own spec as a designSpec
+        // stand-in (see seedCrossNodeContext's DOCUMENT fallback); its recorded fixture
+        // lives under cli/document, and this registry is what MainCliResumeTest depends
+        // on end to end. sdlc-default.json's DOCUMENT instead reads a real DESIGN spec
+        // and a real implementation diff, recorded separately under greenfield/document;
+        // running the real eight-node pipeline through this same registry needs that
+        // fixture wired in here instead, which is real, known, follow-up work (tracked
+        // alongside the rest of the eight-node pipeline's live fixture re-recording),
+        // not something this constructor does today.
         AgentClient documentClient = agentClientFor(live, fixturesDirectory.resolve("cli").resolve("document"), state);
         registry.register("document", new DocumentExecutor(documentClient, artifactsDirectory));
+
+        registry.register("validate", new ValidateExecutor(artifactsDirectory, state,
+            artifactsDirectory.resolve("impact.json"), artifactsDirectory.resolve("implementation.diff")));
+
+        registry.register("release", new ReleaseExecutor(artifactsDirectory, state));
 
         PolicyConfig policyConfig = PolicyConfig.loadFromFile(Path.of("workflows/policy.json"));
         RealPolicyEngine policyEngine = new RealPolicyEngine(policyConfig);
 
         return new WorkflowEngine(graph, state, registry, new Gates(), policyEngine, new Checkpoint(),
-            null, runsDirectory, new CommandRunner(), null, null, autoApprove, approvalStore);
+            targetServiceDirectory, runsDirectory, new CommandRunner(), buildCommand, testCommand,
+            autoApprove, approvalStore);
     }
 
     private static AgentClient agentClientFor(boolean live, Path fixturesDirectory, WorkflowState state) {

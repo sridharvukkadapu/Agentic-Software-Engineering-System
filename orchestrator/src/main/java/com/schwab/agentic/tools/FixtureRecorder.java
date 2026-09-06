@@ -58,6 +58,8 @@ public final class FixtureRecorder {
     private final Path targetServiceDirectory;
     private final List<FixtureOutcome> outcomes = new ArrayList<>();
     private Path implementTargetDirForTestStage;
+    private Path implementationDiffPathForTestStage;
+    private Path greenfieldImpactJsonPath;
 
     public FixtureRecorder(String apiKey, Path fixturesRoot, Path scenariosRoot, Path targetServiceDirectory) {
         this.apiKey = apiKey;
@@ -90,9 +92,12 @@ public final class FixtureRecorder {
             }
             case "--only-greenfield-requirement" -> {
                 // Re-records only greenfield/requirement, after scenarios/greenfield/requirement.md
-                // was amended to answer its own real open questions. No other fixture reads
-                // that file's raw text (recordImpact and recordDesign use their own fixed
-                // problem descriptions), so nothing else needs re-recording.
+                // was amended to answer its own real open questions. Note: this predates
+                // real cross-node context threading; IMPACT and DESIGN now read
+                // REQUIREMENT's real normalizedProblem, so a real requirement-text change
+                // affecting that field also requires --only-full-chain-from-impact
+                // afterward. Kept for the narrower case (a change that does not affect
+                // normalizedProblem, such as a wording fix already covered by ambiguities).
                 deleteFixturesUnder(recorder.fixturesRoot.resolve("greenfield/requirement"));
                 recorder.recordRequirement("greenfield");
             }
@@ -128,6 +133,42 @@ public final class FixtureRecorder {
                 String realImplementationDiff = recorder.replayImplementDiffOnly(realDesignSpec);
                 recorder.recordDocument(realDesignSpec, realImplementationDiff);
             }
+            case "--only-test-only" -> {
+                // Re-records only greenfield/test, replaying the already-recorded and
+                // already-correct greenfield/design and greenfield/implement fixtures
+                // (both unaffected) rather than re-running them live.
+                // implementTargetDirForTestStage and implementationDiffPathForTestStage
+                // are populated as a side effect of replayImplementDiffOnly, exactly as
+                // recordImplement would populate them during a live recordAll pass, so
+                // recordTest can be called afterward unmodified.
+                deleteFixturesUnder(recorder.fixturesRoot.resolve("greenfield/test"));
+                String realDesignSpec = recorder.replayDesignSpecOnly();
+                recorder.replayImplementDiffOnly(realDesignSpec);
+                recorder.recordTest(realDesignSpec);
+            }
+            case "--only-full-chain-from-impact" -> {
+                // Re-records greenfield/impact, greenfield/design, greenfield/implement,
+                // greenfield/test, and greenfield/document together, chained, now that
+                // Main.java's real CLI threads REQUIREMENT's real normalizedProblem into
+                // IMPACT and both that and IMPACT's real impact-analysis.md into DESIGN
+                // as impactSummary. Every fixture from IMPACT onward was previously
+                // recorded against a hand-written stand-in for these values, not
+                // REQUIREMENT's or IMPACT's real output, so replaying the real, unaffected
+                // greenfield/requirement fixture and re-recording live from there is what
+                // makes fixtures/ agree with what the real CLI's real context threading
+                // actually sends.
+                deleteFixturesUnder(recorder.fixturesRoot.resolve("greenfield/impact"));
+                deleteFixturesUnder(recorder.fixturesRoot.resolve("greenfield/design"));
+                deleteFixturesUnder(recorder.fixturesRoot.resolve("greenfield/implement"));
+                deleteFixturesUnder(recorder.fixturesRoot.resolve("greenfield/test"));
+                deleteFixturesUnder(recorder.fixturesRoot.resolve("greenfield/document"));
+                String realNormalizedProblem = recorder.replayRequirementNormalizedProblemOnly();
+                String realImpactSummary = recorder.recordImpact("greenfield", realNormalizedProblem);
+                String realDesignSpec = recorder.recordDesign(realNormalizedProblem, realImpactSummary);
+                String realImplementationDiff = recorder.recordImplement(realDesignSpec);
+                recorder.recordTest(realDesignSpec);
+                recorder.recordDocument(realDesignSpec, realImplementationDiff);
+            }
             case "--only-ambiguous-and-brownfield-requirement" -> {
                 // RequirementExecutor's maxTokens changed (2000 -> 4000) after the real
                 // greenfield fixture's response was found truncated mid-JSON-string at
@@ -159,21 +200,44 @@ public final class FixtureRecorder {
     }
 
     /**
-     * Reconstructs the real design spec text and points {@link #implementTargetDirForTestStage}
-     * at a fresh copy of the throwaway project with the real, already-recorded
-     * implementation replayed into it, all via {@code ReplayClient} rather than the live
-     * API, for {@code --only-test} to re-record just the test stage without re-spending
-     * on stages that are already correctly recorded.
+     * Replays greenfield/requirement's already-recorded fixture and returns its real
+     * {@code normalizedProblem} text, via {@link com.schwab.agentic.agent.ReplayClient}
+     * rather than the live API, for a mode that only needs to re-record a later stage
+     * without re-spending on REQUIREMENT, which did not change.
      */
-    /** Just the real design spec text, via ReplayClient against the already-recorded greenfield/design fixture. */
+    private String replayRequirementNormalizedProblemOnly() throws IOException {
+        Path requirementArtifacts = Files.createTempDirectory("fixture-recorder-replay-requirement-only");
+        var requirementReplay = new com.schwab.agentic.agent.ReplayClient(fixturesRoot.resolve("greenfield/requirement"));
+        RequirementExecutor requirementExecutor = new RequirementExecutor(requirementReplay, requirementArtifacts);
+        Path requirementPath = scenariosRoot.resolve("greenfield").resolve("requirement.md");
+        requirementExecutor.execute(gatedNode("REQUIREMENT", "requirement-complete", RiskLevel.LOW, Set.of()),
+            Map.of("requirementPath", requirementPath.toString()));
+        return readJsonField(requirementArtifacts.resolve("requirement-spec.json"), "normalizedProblem");
+    }
+
+    /**
+     * Replays greenfield/requirement's and greenfield/impact's already-recorded fixtures
+     * for their real, chained text, then replays greenfield/design's already-recorded
+     * fixture against that same real chained context, all via {@code ReplayClient} rather
+     * than the live API, for a mode that only needs to re-record a stage downstream of
+     * DESIGN without re-spending on stages that are already correctly recorded.
+     */
     private String replayDesignSpecOnly() throws IOException {
+        String realNormalizedProblem = replayRequirementNormalizedProblemOnly();
+
+        Path impactArtifacts = Files.createTempDirectory("fixture-recorder-replay-impact-only");
+        var impactReplay = new com.schwab.agentic.agent.ReplayClient(fixturesRoot.resolve("greenfield/impact"));
+        ImpactExecutor impactExecutor = new ImpactExecutor(impactReplay, impactArtifacts, targetServiceDirectory);
+        impactExecutor.execute(gatedNode("IMPACT", "artifact-written", RiskLevel.MEDIUM, Set.of()),
+            Map.of("normalizedProblem", realNormalizedProblem));
+        String realImpactSummary = Files.readString(impactArtifacts.resolve("impact-analysis.md"));
+        this.greenfieldImpactJsonPath = impactArtifacts.resolve("impact.json");
+
         Path designArtifacts = Files.createTempDirectory("fixture-recorder-replay-design-only");
         var designReplay = new com.schwab.agentic.agent.ReplayClient(fixturesRoot.resolve("greenfield/design"));
         DesignExecutor designExecutor = new DesignExecutor(designReplay, designArtifacts, decision -> { });
-        String normalizedProblem = "Add GET /api/v1/urls/{code}/preview returning a cached title and description"
-            + " for the target URL, with a timeout on the external fetch and a 404 for unknown codes.";
         designExecutor.execute(gatedNode("DESIGN", "artifact-written", RiskLevel.MEDIUM, Set.of()),
-            Map.of("normalizedProblem", normalizedProblem));
+            Map.of("normalizedProblem", realNormalizedProblem, "impactSummary", realImpactSummary));
         return Files.readString(designArtifacts.resolve("design-spec.json"));
     }
 
@@ -183,7 +247,10 @@ public final class FixtureRecorder {
      * writing into a fresh copy of target-service, and returns the real
      * {@code implementation.diff} text this produces: the same real diff DocumentExecutor
      * must be recorded against so its fixture stays consistent with whatever
-     * greenfield/implement currently contains.
+     * greenfield/implement currently contains. As a side effect, populates
+     * {@link #implementTargetDirForTestStage} and {@link #implementationDiffPathForTestStage}
+     * exactly as {@link #recordImplement} would, so {@link #recordTest} can be called
+     * afterward without needing to know whether IMPLEMENT was replayed or recorded live.
      */
     private String replayImplementDiffOnly(String realDesignSpec) throws IOException {
         Path artifactsDir = Files.createTempDirectory("fixture-recorder-replay-implement-diff");
@@ -193,9 +260,16 @@ public final class FixtureRecorder {
         WorkflowNode node = gatedNode("IMPLEMENT", "compiles", RiskLevel.HIGH, Set.of("compiles"));
         CommandRunner commandRunner = new CommandRunner();
 
+        Map<String, Object> context = new LinkedHashMap<>();
+        context.put("designSpec", realDesignSpec);
+        String existingCodeContext = readAffectedFilesContent(greenfieldImpactJsonPath, targetServiceDirectory);
+        if (existingCodeContext != null) {
+            context.put("existingCodeContext", existingCodeContext);
+        }
+
         var replayClient = new com.schwab.agentic.agent.ReplayClient(fixturesDir);
         ImplementExecutor executor = new ImplementExecutor(replayClient, implementTargetDir, artifactsDir);
-        executor.execute(node, Map.of("designSpec", realDesignSpec));
+        executor.execute(node, context);
 
         CommandRunner.Result buildResult = commandRunner.run("./gradlew compileJava", implementTargetDir,
             java.time.Duration.ofMinutes(3));
@@ -218,7 +292,9 @@ public final class FixtureRecorder {
                 "previousFailureReason", buildResult.stdout() + buildResult.stderr()));
         }
 
-        return Files.readString(artifactsDir.resolve("implementation.diff"));
+        this.implementTargetDirForTestStage = implementTargetDir;
+        this.implementationDiffPathForTestStage = artifactsDir.resolve("implementation.diff");
+        return Files.readString(this.implementationDiffPathForTestStage);
     }
 
     private String replayRecordedDesignSpec() throws IOException {
@@ -309,12 +385,12 @@ public final class FixtureRecorder {
      * were given disconnected one-line descriptions instead of each other's real text.
      */
     private void recordAll() throws IOException {
-        recordRequirement("greenfield");
+        String realGreenfieldNormalizedProblem = recordRequirement("greenfield");
         recordRequirement("ambiguous");
         recordRequirement("brownfield");
-        recordImpact("greenfield", "Add a link preview endpoint returning title and description for a short code.");
+        String realImpactSummary = recordImpact("greenfield", realGreenfieldNormalizedProblem);
         recordImpact("brownfield", "An expired link's resolution attempt is incorrectly counted as a click.");
-        String realDesignSpec = recordDesign();
+        String realDesignSpec = recordDesign(realGreenfieldNormalizedProblem, realImpactSummary);
         String realImplementationDiff = recordImplement(realDesignSpec);
         recordTest(realDesignSpec);
         recordDocument(realDesignSpec, realImplementationDiff);
@@ -325,7 +401,14 @@ public final class FixtureRecorder {
             riskLevel, 2, producesEvidenceFor);
     }
 
-    private void recordRequirement(String scenarioName) throws IOException {
+    /**
+     * Returns the real {@code normalizedProblem} text this scenario's REQUIREMENT fixture
+     * actually produced (from whichever attempt's gate passed, or the retry's if the
+     * first attempt's gate never did), so downstream stages (IMPACT, DESIGN) can be
+     * recorded against REQUIREMENT's real output rather than a hand-written stand-in,
+     * matching what {@code Main.java}'s real cross-node context threading feeds them.
+     */
+    private String recordRequirement(String scenarioName) throws IOException {
         String slot = scenarioName + "/requirement";
         Path artifactsDir = Files.createTempDirectory("fixture-recorder-artifacts-" + scenarioName + "-req");
         Path fixturesDir = fixturesRoot.resolve(slot);
@@ -362,9 +445,20 @@ public final class FixtureRecorder {
         } else {
             outcomes.add(new FixtureOutcome(slot, true, false, true, first.reason(), null));
         }
+
+        return readJsonField(artifactsDir.resolve("requirement-spec.json"), "normalizedProblem");
     }
 
-    private void recordImpact(String scenarioName, String normalizedProblem) throws IOException {
+    @SuppressWarnings("unchecked")
+    private String readJsonField(Path jsonPath, String field) throws IOException {
+        Map<String, Object> parsed = (Map<String, Object>) com.schwab.agentic.json.Json.parse(
+            Files.readString(jsonPath));
+        Object value = parsed.get(field);
+        return value == null ? null : String.valueOf(value);
+    }
+
+    /** Returns the real impact-analysis.md content this stage produced, for DESIGN to consume. */
+    private String recordImpact(String scenarioName, String normalizedProblem) throws IOException {
         String slot = scenarioName + "/impact";
         Path artifactsDir = Files.createTempDirectory("fixture-recorder-artifacts-" + scenarioName + "-impact");
         Path fixturesDir = fixturesRoot.resolve(slot);
@@ -394,10 +488,21 @@ public final class FixtureRecorder {
                 new GateContext(output.outputs(), null, null, null, null, null, null));
             return new RawAttempt(output, gateResult);
         });
+
+        if (scenarioName.equals("greenfield")) {
+            this.greenfieldImpactJsonPath = artifactsDir.resolve("impact.json");
+        }
+        return Files.readString(artifactsDir.resolve("impact-analysis.md"));
     }
 
-    /** Returns the real design-spec.json content this stage produced, for downstream stages to consume. */
-    private String recordDesign() throws IOException {
+    /**
+     * Returns the real design-spec.json content this stage produced, for downstream
+     * stages to consume. {@code normalizedProblem} and {@code impactSummary} are
+     * REQUIREMENT's and IMPACT's real outputs from this same recording pass, matching
+     * exactly what {@code Main.java}'s real cross-node context threading feeds DESIGN in
+     * production, not a hand-written stand-in.
+     */
+    private String recordDesign(String normalizedProblem, String impactSummary) throws IOException {
         String slot = "greenfield/design";
         Path artifactsDir = Files.createTempDirectory("fixture-recorder-artifacts-design");
         Path fixturesDir = fixturesRoot.resolve(slot);
@@ -407,13 +512,12 @@ public final class FixtureRecorder {
         WorkflowState state = new WorkflowState("FIXTURE-RECORDING", placeholderSpec, List.of(node));
         List<com.schwab.agentic.model.DecisionRecord> decisions = new ArrayList<>();
 
-        String normalizedProblem = "Add GET /api/v1/urls/{code}/preview returning a cached title and description"
-            + " for the target URL, with a timeout on the external fetch and a 404 for unknown codes.";
+        Map<String, Object> context = Map.of("normalizedProblem", normalizedProblem, "impactSummary", impactSummary);
 
         AttemptResult first = attempt(slot, () -> {
             var client = AgentClientFactory.createLive(apiKey, fixturesDir, state);
             DesignExecutor executor = new DesignExecutor(client, artifactsDir, decisions::add);
-            NodeExecutor.ExecutionOutput output = executor.execute(node, Map.of("normalizedProblem", normalizedProblem));
+            NodeExecutor.ExecutionOutput output = executor.execute(node, context);
             Gate gate = new Gates().resolve("artifact-written");
             Gate.Result gateResult = gate.evaluate(node, state,
                 new GateContext(output.outputs(), null, null, null, null, null, null));
@@ -422,10 +526,11 @@ public final class FixtureRecorder {
 
         if (!first.gatePassed()) {
             recordSimpleOutcome(slot, first, () -> {
+                Map<String, Object> retryContext = new LinkedHashMap<>(context);
+                retryContext.put("previousFailureReason", first.reason());
                 var client = AgentClientFactory.createLive(apiKey, fixturesDir, state);
                 DesignExecutor executor = new DesignExecutor(client, artifactsDir, decisions::add);
-                NodeExecutor.ExecutionOutput output = executor.execute(node,
-                    Map.of("normalizedProblem", normalizedProblem, "previousFailureReason", first.reason()));
+                NodeExecutor.ExecutionOutput output = executor.execute(node, retryContext);
                 Gate gate = new Gates().resolve("artifact-written");
                 Gate.Result gateResult = gate.evaluate(node, state,
                     new GateContext(output.outputs(), null, null, null, null, null, null));
@@ -439,7 +544,7 @@ public final class FixtureRecorder {
     }
 
     /**
-     * Consumes the real design spec produced by {@link #recordDesign()} and writes real
+     * Consumes the real design spec produced by {@link #recordDesign(String, String)} and writes real
      * source into {@code implementTargetDir}, which is reused as-is (not copied or
      * summarized) as the compile project {@link #recordTest} writes tests into, so the
      * test stage sees the exact same real classes the implementation stage wrote rather
@@ -458,20 +563,28 @@ public final class FixtureRecorder {
         WorkflowState state = new WorkflowState("FIXTURE-RECORDING", placeholderSpec, List.of(node));
         CommandRunner commandRunner = new CommandRunner();
 
+        Map<String, Object> context = new LinkedHashMap<>();
+        context.put("designSpec", realDesignSpec);
+        String existingCodeContext = readAffectedFilesContent(greenfieldImpactJsonPath, targetServiceDirectory);
+        if (existingCodeContext != null) {
+            context.put("existingCodeContext", existingCodeContext);
+        }
+
         AttemptResult first = attempt(slot, () -> {
             var client = AgentClientFactory.createLive(apiKey, fixturesDir, state);
             ImplementExecutor executor = new ImplementExecutor(client, implementTargetDir, artifactsDir);
-            NodeExecutor.ExecutionOutput output = executor.execute(node, Map.of("designSpec", realDesignSpec));
+            NodeExecutor.ExecutionOutput output = executor.execute(node, context);
             Gate.Result gateResult = evaluateCompiles(node, state, commandRunner, implementTargetDir);
             return new RawAttempt(output, gateResult);
         });
 
         if (!first.gatePassed()) {
             recordSimpleOutcome(slot, first, () -> {
+                Map<String, Object> retryContext = new LinkedHashMap<>(context);
+                retryContext.put("previousFailureReason", first.reason());
                 var client = AgentClientFactory.createLive(apiKey, fixturesDir, state);
                 ImplementExecutor executor = new ImplementExecutor(client, implementTargetDir, artifactsDir);
-                NodeExecutor.ExecutionOutput output = executor.execute(node,
-                    Map.of("designSpec", realDesignSpec, "previousFailureReason", first.reason()));
+                NodeExecutor.ExecutionOutput output = executor.execute(node, retryContext);
                 Gate.Result gateResult = evaluateCompiles(node, state, commandRunner, implementTargetDir);
                 return new RawAttempt(output, gateResult);
             });
@@ -480,7 +593,40 @@ public final class FixtureRecorder {
         }
 
         this.implementTargetDirForTestStage = implementTargetDir;
-        return Files.readString(artifactsDir.resolve("implementation.diff"));
+        this.implementationDiffPathForTestStage = artifactsDir.resolve("implementation.diff");
+        return Files.readString(this.implementationDiffPathForTestStage);
+    }
+
+    /**
+     * The real content of every file {@code impact.json} named under {@code affectedFiles}
+     * (existing target-service classes the impact analysis found this change depends on),
+     * so IMPLEMENT can be told the real package names, class names, and method signatures
+     * of code it must reference, matching exactly what {@code Main.java}'s real
+     * cross-node context threading feeds it in production. Returns {@code null} if
+     * {@code impactJsonPath} is {@code null} or names no affected files at all.
+     */
+    @SuppressWarnings("unchecked")
+    private String readAffectedFilesContent(Path impactJsonPath, Path targetServiceDir) throws IOException {
+        if (impactJsonPath == null || !Files.isRegularFile(impactJsonPath)) {
+            return null;
+        }
+        Map<String, Object> parsed = (Map<String, Object>) com.schwab.agentic.json.Json.parse(
+            Files.readString(impactJsonPath));
+        Object affectedFiles = parsed.get("affectedFiles");
+        if (!(affectedFiles instanceof List<?> list) || list.isEmpty()) {
+            return null;
+        }
+        StringBuilder combined = new StringBuilder();
+        for (Object item : list) {
+            String relativePath = String.valueOf(item);
+            Path absolute = targetServiceDir.resolve(relativePath);
+            if (!Files.isRegularFile(absolute)) {
+                continue;
+            }
+            combined.append("// FILE: ").append(relativePath).append('\n');
+            combined.append(Files.readString(absolute)).append("\n\n");
+        }
+        return combined.length() == 0 ? null : combined.toString();
     }
 
     private Gate.Result evaluateCompiles(WorkflowNode node, WorkflowState state, CommandRunner commandRunner,
@@ -543,29 +689,18 @@ public final class FixtureRecorder {
     }
 
     /**
-     * The real content of every file IMPLEMENT actually wrote under
-     * {@link #implementTargetDirForTestStage}'s {@code src/main/java/com/example} tree
-     * (the new preview package this scenario adds, distinct from target-service's own
-     * pre-existing, unrelated files), so TestExecutor's model is told the real package
-     * and class names it must test rather than inventing its own, which is what caused
-     * DESIGN's proposed names, IMPLEMENT's actual names, and TEST's assumed names to
-     * disagree the first time this fixture was recorded.
+     * The real content of every file named in the real {@code implementation.diff}
+     * IMPLEMENT actually wrote, read via {@link com.schwab.agentic.executor.ImplementationSourceReader},
+     * so TestExecutor's model is told the real package and class names it must test
+     * rather than inventing its own, which is what caused DESIGN's proposed names,
+     * IMPLEMENT's actual names, and TEST's assumed names to disagree the first time this
+     * fixture was recorded. Reading the diff's own file list rather than assuming a fixed
+     * package root is what keeps this correct regardless of which real package name the
+     * model's real output happens to choose from one recording to the next.
      */
-    private String realImplementationSource() throws IOException {
-        Path newPreviewPackageRoot = implementTargetDirForTestStage
-            .resolve("src/main/java/com/example");
-        if (!Files.isDirectory(newPreviewPackageRoot)) {
-            return "(no new source files found)";
-        }
-        StringBuilder combined = new StringBuilder();
-        try (var walk = Files.walk(newPreviewPackageRoot)) {
-            for (Path path : walk.filter(Files::isRegularFile).sorted().toList()) {
-                Path relative = implementTargetDirForTestStage.relativize(path);
-                combined.append("// FILE: ").append(relative).append('\n');
-                combined.append(Files.readString(path)).append("\n\n");
-            }
-        }
-        return combined.toString();
+    private String realImplementationSource() {
+        return com.schwab.agentic.executor.ImplementationSourceReader.readFromDiff(
+            implementTargetDirForTestStage, implementationDiffPathForTestStage);
     }
 
     private void copyThrowawayProjectInto(Path destination) throws IOException {
