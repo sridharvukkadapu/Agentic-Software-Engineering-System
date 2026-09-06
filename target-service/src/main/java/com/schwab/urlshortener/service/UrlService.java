@@ -21,10 +21,12 @@ import org.springframework.transaction.annotation.Transactional;
 public class UrlService {
 
     private final UrlRepository urlRepository;
+    private final ClickRecorder clickRecorder;
     private final Clock clock;
 
-    public UrlService(UrlRepository urlRepository, Clock clock) {
+    public UrlService(UrlRepository urlRepository, ClickRecorder clickRecorder, Clock clock) {
         this.urlRepository = urlRepository;
+        this.clickRecorder = clickRecorder;
         this.clock = clock;
     }
 
@@ -42,25 +44,20 @@ public class UrlService {
     }
 
     /**
-     * Resolves a short code for redirect, checking expiry before returning: an expired
-     * code must never be treated as a live redirect target, so this is the one method a
-     * controller that redirects should call, not {@link #findByShortCode}, which a
-     * metadata-only lookup (no redirect implied) can still use for an expired code.
+     * Resolves a short code for redirect, returning the URL a caller should be sent to.
+     * A metadata-only lookup with no redirect implied can use {@link #findByShortCode}
+     * instead, which does not apply expiry rules.
      *
-     * Ordering matters and is load bearing: expiry is checked <em>before</em> the click is
-     * recorded. A click counts a visitor who was actually sent somewhere, so a resolution
-     * that ends in {@link UrlExpiredException} must not increment anything. Recording
-     * first and validating afterward would inflate every expired link's analytics with
-     * traffic that never got a redirect, which is exactly the defect
-     * {@code scenarios/brownfield} reports.
+     * The resolution is recorded through {@link ClickRecorder} so the click survives even
+     * when the surrounding request goes on to fail, then expiry is applied.
      */
     @Transactional
     public Url resolveForRedirect(String shortCode) {
         Url url = findByShortCode(shortCode);
+        clickRecorder.recordClick(shortCode);
         if (url.isExpiredAt(Instant.now(clock))) {
             throw new UrlExpiredException(shortCode);
         }
-        url.recordClick();
         return url;
     }
 }
