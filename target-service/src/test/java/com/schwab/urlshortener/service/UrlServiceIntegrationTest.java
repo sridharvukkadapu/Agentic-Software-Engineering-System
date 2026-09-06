@@ -112,6 +112,47 @@ class UrlServiceIntegrationTest {
             .isInstanceOf(UrlExpiredException.class);
     }
 
+    @Test
+    void resolvingALiveLinkRecordsAClick() {
+        Instant createdAt = Instant.parse("2026-01-01T00:00:00Z");
+        clock.setInstant(createdAt);
+        Url created = urlService.create("https://example.com/live", null);
+        assertThat(created.getClickCount()).isZero();
+
+        urlService.resolveForRedirect(created.getShortCode());
+        urlService.resolveForRedirect(created.getShortCode());
+
+        assertThat(urlService.findByShortCode(created.getShortCode()).getClickCount()).isEqualTo(2);
+    }
+
+    /**
+     * The ordering constraint, asserted against the persisted counter rather than against
+     * call order: expiry is checked before the click is recorded, so a resolution that
+     * fails with {@link UrlExpiredException} leaves the count untouched. Reading the count
+     * back from the repository (not from the entity the failed call returned, since it
+     * returned nothing) is what makes this a real check on committed state instead of on
+     * in-memory bookkeeping.
+     */
+    @Test
+    void expiryIsCheckedBeforeTheClickIsRecordedSoAnExpiredLinkNeverCounts() {
+        Instant createdAt = Instant.parse("2026-01-01T00:00:00Z");
+        Instant expiresAt = Instant.parse("2026-01-02T00:00:00Z");
+        clock.setInstant(createdAt);
+        Url created = urlService.create("https://example.com/expires", expiresAt);
+
+        clock.setInstant(expiresAt.minusSeconds(1));
+        urlService.resolveForRedirect(created.getShortCode());
+        assertThat(urlService.findByShortCode(created.getShortCode()).getClickCount()).isEqualTo(1);
+
+        clock.setInstant(expiresAt.plusSeconds(1));
+        assertThatThrownBy(() -> urlService.resolveForRedirect(created.getShortCode()))
+            .isInstanceOf(UrlExpiredException.class);
+
+        assertThat(urlService.findByShortCode(created.getShortCode()).getClickCount())
+            .as("an expired resolution attempt must not be counted as a click")
+            .isEqualTo(1);
+    }
+
     /**
      * A real {@link Clock} whose current instant can be moved, standing in for
      * {@code ClockConfig}'s system clock bean in tests. Not a mock: {@code instant()} and

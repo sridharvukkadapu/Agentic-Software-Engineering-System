@@ -47,18 +47,20 @@ public class UrlService {
      * controller that redirects should call, not {@link #findByShortCode}, which a
      * metadata-only lookup (no redirect implied) can still use for an expired code.
      *
-     * Click analytics are out of scope for this reduced build, so there is no separate
-     * "record the click" step here to order against the expiry check; the ordering
-     * constraint is satisfied by construction, since expiry is the only thing this method
-     * does after the lookup, and by there being no click-recording code path at all for it
-     * to race against.
+     * Ordering matters and is load bearing: expiry is checked <em>before</em> the click is
+     * recorded. A click counts a visitor who was actually sent somewhere, so a resolution
+     * that ends in {@link UrlExpiredException} must not increment anything. Recording
+     * first and validating afterward would inflate every expired link's analytics with
+     * traffic that never got a redirect, which is exactly the defect
+     * {@code scenarios/brownfield} reports.
      */
-    @Transactional(readOnly = true)
+    @Transactional
     public Url resolveForRedirect(String shortCode) {
         Url url = findByShortCode(shortCode);
         if (url.isExpiredAt(Instant.now(clock))) {
             throw new UrlExpiredException(shortCode);
         }
+        url.recordClick();
         return url;
     }
 }

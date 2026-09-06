@@ -46,6 +46,9 @@ public class Url {
     @Column(name = "expires_at")
     private Instant expiresAt;
 
+    @Column(name = "click_count", nullable = false)
+    private long clickCount;
+
     protected Url() {
     }
 
@@ -67,6 +70,20 @@ public class Url {
 
     public boolean isExpiredAt(Instant instant) {
         return expiresAt != null && !expiresAt.isAfter(instant);
+    }
+
+    /**
+     * Counts one resolution of this link. Whether a given resolution attempt should be
+     * counted at all is the caller's decision, not this method's: an entity that decided
+     * for itself when a click was legitimate would have to know about expiry policy,
+     * redirect semantics, and the clock, none of which belong here.
+     */
+    public void recordClick() {
+        clickCount++;
+    }
+
+    public long getClickCount() {
+        return clickCount;
     }
 
     public Long getId() {

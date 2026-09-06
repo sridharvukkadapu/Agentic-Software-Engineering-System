@@ -7,7 +7,8 @@ public record UrlResponse(
     String shortUrl,
     String longUrl,
     Instant createdAt,
-    Instant expiresAt) {
+    Instant expiresAt,
+    long clickCount) {
 
     public static UrlResponse from(Url url, String baseUrl) {
         return new UrlResponse(
@@ -15,6 +16,7 @@ public record UrlResponse(
             baseUrl + "/" + url.getShortCode(),
             url.getLongUrl(),
             url.getCreatedAt(),
-            url.getExpiresAt());
+            url.getExpiresAt(),
+            url.getClickCount());
     }
 }
