@@ -1,4 +1,4 @@
-package com.schwab.urlshortener.url;
+package com.schwab.urlshortener.exception;
 
 public class UrlNotFoundException extends RuntimeException {
 

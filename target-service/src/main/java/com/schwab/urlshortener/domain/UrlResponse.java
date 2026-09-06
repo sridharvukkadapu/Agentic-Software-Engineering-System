@@ -1,4 +1,4 @@
-package com.schwab.urlshortener.url;
+package com.schwab.urlshortener.domain;
 
 import java.time.Instant;
 
@@ -6,13 +6,15 @@ public record UrlResponse(
     String shortCode,
     String shortUrl,
     String longUrl,
-    Instant createdAt) {
+    Instant createdAt,
+    Instant expiresAt) {
 
-    static UrlResponse from(Url url, String baseUrl) {
+    public static UrlResponse from(Url url, String baseUrl) {
         return new UrlResponse(
             url.getShortCode(),
             baseUrl + "/" + url.getShortCode(),
             url.getLongUrl(),
-            url.getCreatedAt());
+            url.getCreatedAt(),
+            url.getExpiresAt());
     }
 }

@@ -1,36 +1,26 @@
-package com.schwab.urlshortener.url;
+package com.schwab.urlshortener.repository;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
-import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
-import org.springframework.boot.test.autoconfigure.orm.jpa.TestEntityManager;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
-import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
-
+import com.schwab.urlshortener.domain.Url;
 import java.time.Instant;
 import java.util.Optional;
+import org.junit.jupiter.api.Tag;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
+import org.springframework.boot.test.autoconfigure.orm.jpa.TestEntityManager;
 
 /**
- * Exercises the Flyway migration and repository against a real Postgres container, not a
- * mock, so a passing test proves the schema and queries actually work together.
- *
- * {@code replace = Replace.NONE} is required: {@code @DataJpaTest} defaults to swapping
- * in an embedded database, which would silently bypass the Testcontainers Postgres
- * wired up below.
+ * Exercises the real Flyway migration and repository against a real (in-memory H2,
+ * PostgreSQL-compatibility-mode) database, not a mock, so a passing test proves the
+ * schema and queries actually work together. Tagged {@code fast}: H2 starts in-process
+ * with no external dependency, so this runs in the orchestrator's quick validate loop
+ * with no Docker required.
  */
-@Testcontainers
+@Tag("fast")
 @DataJpaTest
-@AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 class UrlRepositoryIntegrationTest {
-
-    @Container
-    @ServiceConnection
-    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine");
 
     @Autowired
     private UrlRepository urlRepository;

@@ -1,5 +1,9 @@
-package com.schwab.urlshortener.url;
+package com.schwab.urlshortener.controller;
 
+import com.schwab.urlshortener.domain.CreateUrlRequest;
+import com.schwab.urlshortener.domain.Url;
+import com.schwab.urlshortener.domain.UrlResponse;
+import com.schwab.urlshortener.service.UrlService;
 import jakarta.validation.Valid;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
@@ -25,7 +29,7 @@ public class UrlApiController {
 
     @PostMapping
     public ResponseEntity<UrlResponse> create(@Valid @RequestBody CreateUrlRequest request) {
-        Url url = urlService.create(request.longUrl());
+        Url url = urlService.create(request.longUrl(), request.expiresAt());
         return ResponseEntity.status(HttpStatus.CREATED).body(UrlResponse.from(url, baseUrl));
     }
 

@@ -23,6 +23,9 @@ curl -X POST http://localhost:8080/api/urls \
   -d '{"longUrl": "https://example.com/some/very/long/path"}'
 ```
 
+An optional `expiresAt` (ISO-8601 instant) can be included; a URL created with no
+`expiresAt` never expires.
+
 Returns `201 Created`:
 
 ```json
@@ -30,7 +33,8 @@ Returns `201 Created`:
   "shortCode": "1",
   "shortUrl": "http://localhost:8080/1",
   "longUrl": "https://example.com/some/very/long/path",
-  "createdAt": "2026-01-01T00:00:00Z"
+  "createdAt": "2026-01-01T00:00:00Z",
+  "expiresAt": null
 }
 ```
 
@@ -40,7 +44,8 @@ Returns `201 Created`:
 curl -i http://localhost:8080/1
 ```
 
-Returns `302 Found` with a `Location` header pointing at the long URL.
+Returns `302 Found` with a `Location` header pointing at the long URL, `404` if the code
+is unknown, or `410 Gone` if the code exists but has expired.
 
 ### Look up metadata (no redirect)
 
@@ -48,7 +53,15 @@ Returns `302 Found` with a `Location` header pointing at the long URL.
 curl http://localhost:8080/api/urls/1
 ```
 
-Returns the same shape as create, or `404` if the code is unknown.
+Returns the same shape as create, or `404` if the code is unknown. Unlike redirect, this
+does not check expiry: an expired code's metadata is still readable, it just cannot be
+followed.
+
+### Correlation id
+
+Every request and error response carries an `X-Correlation-Id` header: the value sent on
+the request is echoed back, or a fresh one is generated if the request did not send one.
+Every error response body also includes it as `correlationId`.
 
 ## Tests
 
@@ -56,22 +69,12 @@ Returns the same shape as create, or `404` if the code is unknown.
 ./gradlew test
 ```
 
-Unit tests cover the base62 short code encoder and the web layer (`@WebMvcTest`).
-`UrlRepositoryIntegrationTest` and `UrlServiceIntegrationTest` exercise the Flyway
-migration, repository, and service against a real Postgres container via Testcontainers,
-so they require a running Docker daemon.
-
-If Testcontainers fails with "Could not find a valid Docker environment" on macOS with
-Docker Desktop, its socket auto-detection can fail to resolve the Desktop-managed unix
-socket. Point it at the real socket explicitly:
-
-```bash
-export DOCKER_HOST=$(docker context inspect desktop-linux --format '{{.Endpoints.docker.Host}}')
-./gradlew test
-```
-
-The build forwards `DOCKER_HOST` from the environment into the test JVM (see
-`build.gradle.kts`), since Gradle's `Test` task does not inherit it automatically.
+All tests run against an in-memory H2 database (PostgreSQL compatibility mode) with no
+external service and no Docker daemon required. `UrlRepositoryIntegrationTest` and
+`UrlServiceIntegrationTest` exercise a real Flyway migration, a real repository, and a
+real Spring context, just against H2 instead of Postgres; see
+`src/main/resources/db/migration/h2/` for the H2-specific migration kept in sync with the
+real Postgres one under `src/main/resources/db/migration/postgresql/`.
 
 ## Design notes
 
@@ -82,7 +85,18 @@ The build forwards `DOCKER_HOST` from the environment into the test JVM (see
   `@PrePersist` callback on `Url` can encode the short code into that same insert
   statement, instead of inserting a row with a null code and updating it afterward.
 - Schema changes go through Flyway migrations (`src/main/resources/db/migration`), not
-  `ddl-auto`, so schema history is reviewable.
-- Scope for this pass is the core APIs only: create, redirect, lookup. Analytics and
-  reliability features (rate limiting, caching, Mongo-backed click tracking) are
+  `ddl-auto`, so schema history is reviewable. Postgres and H2 need slightly different
+  DDL for the same schema (H2 does not accept Postgres's `DEFAULT nextval(...)` column
+  default or its `OWNED BY` sequence-ownership clause), so each vendor gets its own
+  migration folder; Flyway's `locations` property picks the right one per profile.
+- `Clock` is injected everywhere real-time matters (`ClockConfig`), never
+  `Instant.now()` directly, so expiry is testable by supplying a fixed or settable clock
+  rather than sleeping past a real TTL.
+- `CorrelationIdFilter` puts the correlation id in MDC for the life of a request and
+  clears it afterward, so it is available to any log statement without threading it
+  through every method signature, and cannot leak onto a later request when the servlet
+  container reuses the handling thread.
+- Scope for this pass is the core APIs (create, redirect, lookup) plus expiry, clock
+  injection, correlation ids, and a global exception handler. Rate limiting, SSRF
+  validation, idempotency keys, click analytics, and OpenAPI documentation are
   deliberately deferred to a later change.

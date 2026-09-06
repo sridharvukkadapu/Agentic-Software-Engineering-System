@@ -1,4 +1,4 @@
-package com.schwab.urlshortener.url;
+package com.schwab.urlshortener.domain;
 
 /**
  * Encodes a positive database id as a base62 short code.
@@ -27,5 +27,21 @@ public final class ShortCodeEncoder {
             remaining /= BASE;
         }
         return result.reverse().toString();
+    }
+
+    /** The inverse of {@link #encode}, so the transform can be proven a true round trip, not just injective. */
+    public static long decode(String code) {
+        if (code == null || code.isEmpty()) {
+            throw new IllegalArgumentException("code must not be blank");
+        }
+        long id = 0;
+        for (int i = 0; i < code.length(); i++) {
+            int digit = ALPHABET.indexOf(code.charAt(i));
+            if (digit < 0) {
+                throw new IllegalArgumentException("code contains a character outside the base62 alphabet: " + code);
+            }
+            id = id * BASE + digit;
+        }
+        return id;
     }
 }
