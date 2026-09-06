@@ -76,19 +76,73 @@ public final class FixtureRecorder {
         FixtureRecorder recorder = new FixtureRecorder(apiKey, repoRoot.resolve("fixtures"),
             repoRoot.resolve("scenarios"), repoRoot.resolve("target-service"));
 
-        boolean testOnly = args.length > 0 && args[0].equals("--only-test");
-        if (testOnly) {
-            // Re-records only greenfield/test, reusing the already-recorded, still-valid
-            // greenfield/design and greenfield/implement fixtures via ReplayClient
-            // rather than re-running them live: they are unaffected by the ordering fix
-            // that made the old greenfield/test fixture's prompt text stale, so
-            // re-recording them again would spend real money for no reason.
-            deleteFixturesUnder(recorder.fixturesRoot.resolve("greenfield/test"));
-            String realDesignSpec = recorder.replayRecordedDesignSpec();
-            recorder.recordTest(realDesignSpec);
-        } else {
-            recorder.deleteExistingFixtures();
-            recorder.recordAll();
+        String mode = args.length > 0 ? args[0] : "";
+        switch (mode) {
+            case "--only-test" -> {
+                // Re-records only greenfield/test, reusing the already-recorded, still-valid
+                // greenfield/design and greenfield/implement fixtures via ReplayClient
+                // rather than re-running them live: they are unaffected by the ordering fix
+                // that made the old greenfield/test fixture's prompt text stale, so
+                // re-recording them again would spend real money for no reason.
+                deleteFixturesUnder(recorder.fixturesRoot.resolve("greenfield/test"));
+                String realDesignSpec = recorder.replayRecordedDesignSpec();
+                recorder.recordTest(realDesignSpec);
+            }
+            case "--only-greenfield-requirement" -> {
+                // Re-records only greenfield/requirement, after scenarios/greenfield/requirement.md
+                // was amended to answer its own real open questions. No other fixture reads
+                // that file's raw text (recordImpact and recordDesign use their own fixed
+                // problem descriptions), so nothing else needs re-recording.
+                deleteFixturesUnder(recorder.fixturesRoot.resolve("greenfield/requirement"));
+                recorder.recordRequirement("greenfield");
+            }
+            case "--only-implement-and-test" -> {
+                // Re-records greenfield/implement and greenfield/test together, chained,
+                // now that ImplementExecutor's fixture targets a real copy of
+                // target-service/ (a real Spring Boot project) instead of the plain
+                // JUnit-only throwaway project: ImplementExecutor's real production
+                // target genuinely has Spring/Jackson available, so recording its
+                // fixture against a classpath that lacks them was itself the defect, not
+                // the model's real, reasonable use of those frameworks. TestExecutor
+                // writes directly into the same real target-service copy IMPLEMENT just
+                // wrote into, so it sees the exact real classes it is testing, and its
+                // real tests-pass gate runs target-service's actual full test suite.
+                deleteFixturesUnder(recorder.fixturesRoot.resolve("greenfield/implement"));
+                deleteFixturesUnder(recorder.fixturesRoot.resolve("greenfield/test"));
+                String realDesignSpec = recorder.replayDesignSpecOnly();
+                String realImplementationDiff = recorder.recordImplement(realDesignSpec);
+                recorder.recordTest(realDesignSpec);
+                System.out.println("real implementation diff length: " + realImplementationDiff.length());
+            }
+            case "--only-document" -> {
+                // Re-records only greenfield/document, after greenfield/implement was
+                // re-recorded against target-service (com.example.preview.*): the old
+                // greenfield/document fixture's implementationDiff still named the prior
+                // recording's file set (com.example.urlshortener.preview.*, including
+                // RedisPreviewCache.java), so a real DocumentExecutor call built from the
+                // CURRENT implement fixture's real diff can no longer match it by hash.
+                // Replays design and implement (both unaffected, still valid) rather than
+                // re-running them live.
+                deleteFixturesUnder(recorder.fixturesRoot.resolve("greenfield/document"));
+                String realDesignSpec = recorder.replayDesignSpecOnly();
+                String realImplementationDiff = recorder.replayImplementDiffOnly(realDesignSpec);
+                recorder.recordDocument(realDesignSpec, realImplementationDiff);
+            }
+            case "--only-ambiguous-and-brownfield-requirement" -> {
+                // RequirementExecutor's maxTokens changed (2000 -> 4000) after the real
+                // greenfield fixture's response was found truncated mid-JSON-string at
+                // 2000 tokens; this changes every RequirementExecutor fixture's request
+                // hash, so ambiguous and brownfield need re-recording too even though
+                // their requirement.md files did not change.
+                deleteFixturesUnder(recorder.fixturesRoot.resolve("ambiguous/requirement"));
+                deleteFixturesUnder(recorder.fixturesRoot.resolve("brownfield/requirement"));
+                recorder.recordRequirement("ambiguous");
+                recorder.recordRequirement("brownfield");
+            }
+            default -> {
+                recorder.deleteExistingFixtures();
+                recorder.recordAll();
+            }
         }
         recorder.printReport();
     }
@@ -111,6 +165,62 @@ public final class FixtureRecorder {
      * API, for {@code --only-test} to re-record just the test stage without re-spending
      * on stages that are already correctly recorded.
      */
+    /** Just the real design spec text, via ReplayClient against the already-recorded greenfield/design fixture. */
+    private String replayDesignSpecOnly() throws IOException {
+        Path designArtifacts = Files.createTempDirectory("fixture-recorder-replay-design-only");
+        var designReplay = new com.schwab.agentic.agent.ReplayClient(fixturesRoot.resolve("greenfield/design"));
+        DesignExecutor designExecutor = new DesignExecutor(designReplay, designArtifacts, decision -> { });
+        String normalizedProblem = "Add GET /api/v1/urls/{code}/preview returning a cached title and description"
+            + " for the target URL, with a timeout on the external fetch and a 404 for unknown codes.";
+        designExecutor.execute(gatedNode("DESIGN", "artifact-written", RiskLevel.MEDIUM, Set.of()),
+            Map.of("normalizedProblem", normalizedProblem));
+        return Files.readString(designArtifacts.resolve("design-spec.json"));
+    }
+
+    /**
+     * Replays the current, already-recorded greenfield/implement fixture (including its
+     * retry, if the fixture needed one) via {@link com.schwab.agentic.agent.ReplayClient},
+     * writing into a fresh copy of target-service, and returns the real
+     * {@code implementation.diff} text this produces: the same real diff DocumentExecutor
+     * must be recorded against so its fixture stays consistent with whatever
+     * greenfield/implement currently contains.
+     */
+    private String replayImplementDiffOnly(String realDesignSpec) throws IOException {
+        Path artifactsDir = Files.createTempDirectory("fixture-recorder-replay-implement-diff");
+        Path implementTargetDir = Files.createTempDirectory("fixture-recorder-replay-implement-target");
+        copyTargetServiceInto(implementTargetDir);
+        Path fixturesDir = fixturesRoot.resolve("greenfield/implement");
+        WorkflowNode node = gatedNode("IMPLEMENT", "compiles", RiskLevel.HIGH, Set.of("compiles"));
+        CommandRunner commandRunner = new CommandRunner();
+
+        var replayClient = new com.schwab.agentic.agent.ReplayClient(fixturesDir);
+        ImplementExecutor executor = new ImplementExecutor(replayClient, implementTargetDir, artifactsDir);
+        executor.execute(node, Map.of("designSpec", realDesignSpec));
+
+        CommandRunner.Result buildResult = commandRunner.run("./gradlew compileJava", implementTargetDir,
+            java.time.Duration.ofMinutes(3));
+        if (!buildResult.succeeded()) {
+            Path latestFile;
+            try (var walk = Files.walk(fixturesDir)) {
+                latestFile = walk.filter(Files::isRegularFile)
+                    .max(java.util.Comparator.comparingLong(path -> path.toFile().lastModified()))
+                    .orElseThrow();
+            }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> fixture = (Map<String, Object>) com.schwab.agentic.json.Json.parse(Files.readString(latestFile));
+            @SuppressWarnings("unchecked")
+            Map<String, Object> response = (Map<String, Object>) fixture.get("response");
+            String retryResponseText = (String) response.get("text");
+            com.schwab.agentic.agent.AgentClient fixedResponseClient = request -> new com.schwab.agentic.agent.AgentResponse(
+                retryResponseText, 0, 0, 0, com.schwab.agentic.agent.Mode.REPLAY, "fixture-recorder-retry-reconstruction");
+            ImplementExecutor retryExecutor = new ImplementExecutor(fixedResponseClient, implementTargetDir, artifactsDir);
+            retryExecutor.execute(node, Map.of("designSpec", realDesignSpec,
+                "previousFailureReason", buildResult.stdout() + buildResult.stderr()));
+        }
+
+        return Files.readString(artifactsDir.resolve("implementation.diff"));
+    }
+
     private String replayRecordedDesignSpec() throws IOException {
         Path designArtifacts = Files.createTempDirectory("fixture-recorder-replay-design");
         var designReplay = new com.schwab.agentic.agent.ReplayClient(fixturesRoot.resolve("greenfield/design"));
@@ -340,7 +450,7 @@ public final class FixtureRecorder {
         String slot = "greenfield/implement";
         Path artifactsDir = Files.createTempDirectory("fixture-recorder-artifacts-implement");
         Path implementTargetDir = Files.createTempDirectory("fixture-recorder-implement-target");
-        copyThrowawayProjectInto(implementTargetDir);
+        copyTargetServiceInto(implementTargetDir);
         Path fixturesDir = fixturesRoot.resolve(slot);
 
         WorkflowNode node = gatedNode("IMPLEMENT", "compiles", RiskLevel.HIGH, Set.of("compiles"));
@@ -404,6 +514,7 @@ public final class FixtureRecorder {
 
         Map<String, Object> context = Map.of(
             "designSpec", realDesignSpec,
+            "implementationSource", realImplementationSource(),
             "acceptanceCriteria", List.of(Map.of("id", "AC-1", "description", "returns a preview for a known short code")));
 
         AttemptResult first = attempt(slot, () -> {
@@ -431,11 +542,72 @@ public final class FixtureRecorder {
         });
     }
 
+    /**
+     * The real content of every file IMPLEMENT actually wrote under
+     * {@link #implementTargetDirForTestStage}'s {@code src/main/java/com/example} tree
+     * (the new preview package this scenario adds, distinct from target-service's own
+     * pre-existing, unrelated files), so TestExecutor's model is told the real package
+     * and class names it must test rather than inventing its own, which is what caused
+     * DESIGN's proposed names, IMPLEMENT's actual names, and TEST's assumed names to
+     * disagree the first time this fixture was recorded.
+     */
+    private String realImplementationSource() throws IOException {
+        Path newPreviewPackageRoot = implementTargetDirForTestStage
+            .resolve("src/main/java/com/example");
+        if (!Files.isDirectory(newPreviewPackageRoot)) {
+            return "(no new source files found)";
+        }
+        StringBuilder combined = new StringBuilder();
+        try (var walk = Files.walk(newPreviewPackageRoot)) {
+            for (Path path : walk.filter(Files::isRegularFile).sorted().toList()) {
+                Path relative = implementTargetDirForTestStage.relativize(path);
+                combined.append("// FILE: ").append(relative).append('\n');
+                combined.append(Files.readString(path)).append("\n\n");
+            }
+        }
+        return combined.toString();
+    }
+
     private void copyThrowawayProjectInto(Path destination) throws IOException {
         Path source = findRepoRoot().resolve("orchestrator/src/test/resources/throwaway-compile-project");
         try (var walk = Files.walk(source)) {
             for (Path path : walk.filter(Files::isRegularFile).toList()) {
                 Path relative = source.relativize(path);
+                Path target = destination.resolve(relative);
+                Files.createDirectories(target.getParent());
+                Files.copy(path, target);
+                target.toFile().setExecutable(path.toFile().canExecute());
+            }
+        }
+    }
+
+    /**
+     * Copies the real {@code target-service/} project (excluding {@code build/} and
+     * {@code .gradle/}, regeneratable build caches) into {@code destination}, so
+     * ImplementExecutor's fixture is recorded against its actual real-world target, a
+     * real Spring Boot project with real Spring, Jackson, and other dependencies
+     * genuinely available, rather than the plain-JUnit throwaway project TestExecutor's
+     * fixture uses (ImplementExecutor and TestExecutor target different real projects in
+     * production: ImplementExecutor writes into target-service/ itself; TestExecutor's
+     * own fixture is recorded against the throwaway project purely for fast, hermetic
+     * TestExecutor testing, a distinction documented in docs/decisions.md).
+     */
+    private void copyTargetServiceInto(Path destination) throws IOException {
+        Path source = findRepoRoot().resolve("target-service");
+        List<String> excludedDirectoryNames = List.of("build", ".gradle", ".git");
+        try (var walk = Files.walk(source)) {
+            for (Path path : walk.filter(Files::isRegularFile).toList()) {
+                Path relative = source.relativize(path);
+                boolean excluded = false;
+                for (Path part : relative) {
+                    if (excludedDirectoryNames.contains(part.toString())) {
+                        excluded = true;
+                        break;
+                    }
+                }
+                if (excluded) {
+                    continue;
+                }
                 Path target = destination.resolve(relative);
                 Files.createDirectories(target.getParent());
                 Files.copy(path, target);

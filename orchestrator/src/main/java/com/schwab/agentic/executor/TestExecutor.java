@@ -322,6 +322,11 @@ public final class TestExecutor implements NodeExecutor {
         if (context.containsKey("designSpec")) {
             prompt.append("Design spec:\n").append(context.get("designSpec")).append("\n\n");
         }
+        if (context.containsKey("implementationSource")) {
+            prompt.append("The real implementation source you must test (use exactly these package names,")
+                .append(" class names, method signatures, and constructors; do not invent your own):\n")
+                .append(context.get("implementationSource")).append("\n\n");
+        }
         if (context.containsKey("acceptanceCriteria")) {
             prompt.append("Acceptance criteria:\n")
                 .append(com.schwab.agentic.json.Json.write(normalizedAcceptanceCriteria(context.get("acceptanceCriteria"))))

@@ -138,14 +138,22 @@ written* (`filesWritten`, resolved and normalized), sidestepping the concurrency
 real pre/post filesystem diff would reintroduce (a sibling node's legitimate concurrent
 write to its own `writePaths` would otherwise look like this node writing outside its own).
 
-**Trade-off.** `audit-completeness`, the spec doc's eighth rule, was dropped to keep the
-total at eight after this split, rather than shipping a ninth rule. Every status
-transition already goes through `WorkflowState.transition`, which always appends exactly
-one audit event by construction; a node cannot reach a terminal status through any other
-path in this codebase. `audit-completeness`'s DENY branch would therefore be unreachable
-without deliberately corrupting `WorkflowState`'s internal state to fabricate a gap, which
-would make its required "prove it can fire" test artificial rather than a real reachable
-threshold, exactly what CLAUDE.md rule 6 argues against.
+**Trade-off.** `audit-completeness`, the spec doc's eighth rule (compliance category: DENY
+release when any node reached a terminal status without a matching audit event), was
+dropped to keep the total at eight after this split, rather than shipping a ninth rule.
+Every status transition already goes through `WorkflowState.transition`, which always
+appends exactly one audit event by construction; a node cannot reach a terminal status
+through any other path in this codebase. `audit-completeness`'s DENY branch would
+therefore be unreachable without deliberately corrupting `WorkflowState`'s internal state
+to fabricate a gap, which would make its required "prove it can fire" test artificial
+rather than a real reachable threshold, exactly what CLAUDE.md rule 6 argues against.
+Dropping it left compliance with only one rule (`evidence-before-release`), fewer than
+change-control (three) or security (four); `evidence-coverage` (DENY at the RELEASE gate
+when an acceptance criterion has zero `Evidence` records at all, distinct from
+`evidence-before-release`'s broader "no *passing* evidence," which also catches an
+attempted-but-failed criterion) was added afterward to restore compliance to two rules
+and give it a second, genuinely reachable check: a test agent that silently skips a
+criterion produces exactly the zero-evidence state this rule denies.
 
 ## D6. Cross-process resume needs a real CLI, scoped to what spec 05 actually tests
 
@@ -265,17 +273,23 @@ gets closed by a specific later spec, named here so it does not have to be redis
     though the gate and its tests existed; fixed by wiring the correct gate into the
     workflow file.
   - The real design spec for a Spring Boot URL shortener naturally led the model toward
-    Spring/Jackson/SLF4J-flavored implementation code on its first attempt, which failed
-    to compile in the plain `throwaway-compile-project` fixture (a bare `java` plugin
-    project with no Spring dependencies, chosen for fast, hermetic ImplementExecutor
-    testing). The retry, given the real compiler output, produced simpler self-contained
-    code that did compile, exercising AC-04-4 for real. `TestExecutor`'s test-writing
-    attempts for the same scenario were less lucky: both the first attempt and its retry
-    produced Spring/Jackson-referencing test code that also cannot compile in the plain
-    project. This is recorded and asserted as a genuine, known environment-fidelity gap
-    (`GreenfieldEndToEndTest.testRealTestFixtureReplaysTheRealRecordedFailure`), not
-    patched by adding Spring dependencies to the throwaway project or by coaching the
-    prompt away from a design choice that is otherwise reasonable for this codebase.
+    Spring/Jackson-flavored implementation code on its first attempt. The first live
+    recording pass judged that code against `throwaway-compile-project` (a bare `java`
+    plugin project with no Spring dependencies, originally chosen for fast, hermetic
+    ImplementExecutor testing), where it correctly failed to compile, since the classpath
+    genuinely lacked what the code used. This was not the model's error: `ImplementExecutor`'s
+    and `TestExecutor`'s real production target is `target-service/` itself, a real Spring
+    Boot project with real Spring, Jackson, and JPA dependencies, so judging their real
+    output against a classpath that could never support it was the actual defect. Fixed by
+    recording `greenfield/implement` and `greenfield/test` against
+    `TargetServiceCompileProject` (a real copy of `target-service/`, excluding `build/` and
+    `.gradle/`) instead of the throwaway project. Once corrected, the real recorded attempt
+    still needed one retry (the model's first attempt used `spring-data-redis`'s
+    `StringRedisTemplate`, which target-service does not actually depend on; the retry
+    dropped it for a plain `ConcurrentHashMap`-backed cache), and the retry's output
+    genuinely compiles. `throwaway-compile-project` remains in use only for `TestExecutorTest`'s
+    own fast, hermetic unit tests, which exercise `TestExecutor`'s parsing and evidence
+    logic in isolation and do not need a real Spring classpath.
   - The first live recording pass also surfaced a design bug in the recorder itself, not
     in any executor: `FixtureRecorder`'s original `recordTest`/`recordImplement`/
     `recordDocument` each fed a stage a short, hand-written, disconnected description of
@@ -322,14 +336,14 @@ gets closed by a specific later spec, named here so it does not have to be redis
 
   | Fixture | Recorded live | First attempt passed its gate |
   |---|---|---|
-  | greenfield/requirement | yes | no (real open questions; correct safe-stop, no retry helps) |
+  | greenfield/requirement | yes | no (real open questions; correct safe-stop; retry with the amended requirement text passes) |
   | ambiguous/requirement | yes | no (real open questions; correct safe-stop, no retry helps) |
   | brownfield/requirement | yes | no first attempt, yes on retry |
   | greenfield/impact | yes | yes |
   | brownfield/impact | yes | yes |
   | greenfield/design | yes | yes |
-  | greenfield/implement | yes | no first attempt (Spring-flavored code), yes on retry |
-  | greenfield/test | yes | no first attempt, no on retry (environment-fidelity gap, see above) |
+  | greenfield/implement | yes | no first attempt (used a Redis dependency target-service lacks), yes on retry |
+  | greenfield/test | yes | yes |
   | greenfield/document | yes | yes |
 
   Verified zero fixtures still trace back to `FakeAgentClient`: every file under
@@ -338,3 +352,56 @@ gets closed by a specific later spec, named here so it does not have to be redis
   `FakeAgentClient` and `unused-fake-fixture-key`, the sentinel value the old
   `FakeAgentClient.alwaysReturningText` factory stamped into every placeholder response)
   both return nothing.
+
+## D7. Getting the greenfield scenario to a real, replayable RELEASE COMPLETED
+
+**Problem.** `GreenfieldEndToEndTest.testFullGreenfieldPipelineReachesRealReleaseCompleted`
+chains all eight real recorded fixtures through their real executors and asserts a real
+RELEASE COMPLETED outcome. Reaching that state for real, not by relaxing an assertion,
+surfaced three independent, genuine defects that D6's fixture-recording pass had not yet
+found, because none of the individual per-stage tests happened to combine in a way that
+exposed them.
+
+**Decision.**
+
+1. `RequirementExecutor`'s `maxTokens` was 2000. The amended, more detailed
+   `scenarios/greenfield/requirement.md` (see D6) produces a genuinely longer real
+   response, which was truncated mid-JSON-string at that limit: a real, reproducible
+   parse failure, not a flaky one. Raised to 4000, which required re-recording every
+   `RequirementExecutor` fixture (the token limit is part of the request hash).
+
+2. `TestExecutor`'s prompt only ever received the abstract `designSpec` text, never
+   `IMPLEMENT`'s actual written source. Recorded independently, `TEST`'s fixture invented
+   its own class and package names that disagreed with what `IMPLEMENT`'s real, separately
+   recorded diff actually wrote (`com.example.preview.PreviewService` versus whatever
+   `IMPLEMENT` had really produced), the same root cause D6 had already found and fixed
+   once between `IMPACT` and `IMPLEMENT`, recurring here between `TEST` and `IMPLEMENT`
+   for the same reason: two independently recorded live calls, each shown only a
+   hand-written description of the other's output rather than the other's real text.
+   Fixed by threading an `implementationSource` context key (the real files `IMPLEMENT`
+   wrote, read back off disk) into `TestExecutor`'s prompt, both in `FixtureRecorder` and
+   in the real orchestrator's own prompt-building code, so a real run gets the same fix a
+   test-only workaround would not have covered.
+
+3. `target-service/build.gradle.kts` had no `testLogging` configuration, so Gradle's
+   `test` task printed only a final `BUILD SUCCESSFUL`/`BUILD FAILED` summary line, never
+   a per-test `PASSED`/`FAILED` result. `TestExecutor` parses exactly those per-test lines
+   to attribute evidence to acceptance criteria; against target-service's actual, real
+   build file, every criterion silently got zero evidence even when every test genuinely
+   passed, regardless of what the model wrote. This is a real production defect, not a
+   fixture artifact: it would have sunk evidence collection for every `TEST` node run
+   against target-service, fixtures aside. Fixed by adding
+   `testLogging { events("passed", "failed", "skipped") }` to target-service's `Test`
+   task configuration.
+
+**Trade-off.** None of these are fixture-massaging: each is a defect that would recur
+identically against a real, live, uncached model call, so each is fixed at the source
+(the executor's prompt, the executor's token budget, or the target project's own build
+configuration) rather than in a test helper. Fixing (2) and the classpath mismatch
+documented in D6 required re-recording `greenfield/implement`, `greenfield/test`, and
+`greenfield/document` (the latter because its recorded `implementationDiff` still named
+the prior recording's file set once `implement` changed); `FixtureRecorder` gained
+`--only-implement-and-test` and `--only-document` modes so each re-recording spent real
+API credit only on the affected stages. The full 148-test suite, including
+`testFullGreenfieldPipelineReachesRealReleaseCompleted`, passes under `--replay` with no
+network access and no API key.

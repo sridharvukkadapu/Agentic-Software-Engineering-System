@@ -73,7 +73,7 @@ public final class RequirementExecutor implements NodeExecutor {
         String requirementText = readRequirementText(context);
         String userPrompt = buildUserPrompt(requirementText, context);
 
-        AgentResponse response = agentClient.call(new AgentRequest(SYSTEM_PROMPT, userPrompt, 2000, node.id()));
+        AgentResponse response = agentClient.call(new AgentRequest(SYSTEM_PROMPT, userPrompt, 4000, node.id()));
 
         ResponseParser.ParseResult parseResult = ResponseParser.extractJson(response.text(), "json",
             List.of("normalizedProblem", "acceptanceCriteria", "ambiguities", "assumptions", "outOfScope",

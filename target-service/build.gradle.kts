@@ -52,6 +52,15 @@ tasks.withType<Test> {
     System.getenv("DOCKER_HOST")?.let { dockerHost ->
         environment("DOCKER_HOST", dockerHost)
     }
+
+    // The orchestrator's TestExecutor parses this task's console output line by line to
+    // attribute PASSED/FAILED outcomes to acceptance criteria (by matching the criterion
+    // id inside each test method's name). Gradle prints nothing per test by default, only
+    // a final BUILD SUCCESSFUL/FAILED summary, so without these events every criterion
+    // would silently get zero evidence even when every test genuinely passed.
+    testLogging {
+        events("passed", "failed", "skipped")
+    }
 }
 
 tasks.named<BootJar>("bootJar") {
