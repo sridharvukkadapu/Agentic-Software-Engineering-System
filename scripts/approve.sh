@@ -28,6 +28,6 @@ fi
 
 "$JAVA" -cp "$ROOT_DIR/orchestrator/out/main" com.schwab.agentic.cli.Main approve \
   --run-id "$RUN_ID" "$NODE_ID" \
-  --workflow "$ROOT_DIR/workflows/approval-demo.json" \
+  --workflow "$ROOT_DIR/workflows/sdlc-default.json" \
   --runs "$ROOT_DIR/runs" \
   "$@"

@@ -31,7 +31,7 @@ else
 fi
 
 "$JAVA" -cp "$ROOT_DIR/orchestrator/out/main" com.schwab.agentic.cli.Main run \
-  --workflow "$ROOT_DIR/workflows/approval-demo.json" \
+  --workflow "$ROOT_DIR/workflows/sdlc-default.json" \
   --requirement "$REQUIREMENT_PATH" \
   --runs "$ROOT_DIR/runs" \
   --fixtures "$ROOT_DIR/fixtures" \

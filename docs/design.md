@@ -54,11 +54,11 @@ to its own virtual thread, wait for the whole wave, then loop. An iteration guar
 theoretical infinite loop into a distinct, named SAFE_STOP reason rather than a silent
 hang.
 
-Each node in a wave passes through, in order: its entry gate (a scheduling question — a
-failed entry gate leaves the node PENDING and consumes no retry attempt), a
+Each node in a wave passes through, in order: its entry gate (a scheduling question, since
+a failed entry gate leaves the node PENDING and consumes no retry attempt), a
 pre-execution policy check (approval-required and CRITICAL/HIGH-risk rules), the
 executor itself, a post-execution policy check (write-paths, protected-paths, secrets,
-dependency additions, change budget — anything that needs to see what was actually
+dependency additions, change budget: anything that needs to see what was actually
 written), and finally its exit gate. An executor's own `executorReportedSuccess` never
 decides the outcome by itself; only the exit gate does, which is what makes "no hardcoded
 agent responses" (CLAUDE.md rule 2) enforceable rather than aspirational: a canned
@@ -232,11 +232,16 @@ MainCliFullPipelineTest.testRunReachesCompletedWithAllEightNodesCompletedAcrossA
 Separately, and unrelated to spec 07: the retry-path fixtures for all three scenarios'
 REQUIREMENT node were recorded before a later fix changed the retry-reason text embedded
 in the retry prompt (from a non-reproducible temp path to the actual open-questions
-text), so the real first-attempt safe-stop (open questions correctly detected, exit gate
-correctly fails) is followed by a real `MissingFixtureException` on the retry, in all
-three committed scenario runs under `runs/`. The mechanism this proves, a correct,
-designed safe-stop on real unanswered questions, is real; the retry attempt after it is
-the credit-blocked part.
+text). The run's real, current terminal status (`SAFE_STOPPED`) is not itself evidence of
+a clean stop on ambiguity: it is reached because attempt 1 correctly detects open
+questions and fails its exit gate (real, designed behavior), and the automatic retry that
+follows immediately **crashes** with a real `MissingFixtureException` (an unhandled
+exception inside `runAttemptsUntilOutcome`, caught by `executeOneNode`'s own
+catch-and-fail path, which is what actually produces the `SAFE_STOPPED` status), in all
+three committed scenario runs under `runs/`. The first-attempt mechanism, a correct,
+designed safe-stop trigger on real unanswered questions, is real and worth citing on its
+own; the crash immediately after it is the credit-blocked part, and the two should not be
+described as one continuous clean stop.
 
 The fix for both is the same command, once credit is available:
 `java -cp orchestrator/out com.schwab.agentic.tools.FixtureRecorder`, which supports
@@ -305,11 +310,14 @@ quickstart command in the README runs the small demo graph by default.
   text to keep old fixtures valid, was rejected: a fixture that constrains real code
   changes is a fixture that has stopped serving its purpose.
 - **Rollback restores exactly what a node's own declared `writePaths` covers, nothing
-  more.** A node that (like `runs/POLICY-DENIAL-DEMO`'s demonstration executor) writes
-  outside its own declared paths produces a write that its own checkpoint was never
-  scoped to protect or restore; policy denies and safe-stops the run, but does not
-  itself clean up the escaping write. This is a deliberate, narrow checkpoint scope (so
-  two nodes with disjoint `writePaths` can roll back independently, per D2), not a
-  rollback bug, and it is exactly what makes `write-paths-contract` a security boundary
-  worth having rather than a formality: a checkpoint cannot be relied on to undo a write
-  it was never told to watch.
+  more.** `runs/POLICY-DENIAL-DEMO`'s demonstration executor both modifies a real,
+  pre-existing file inside its declared `writePaths` and writes a second file outside
+  them; rollback restores the first (a genuine, content-hash-verified `restored 1
+  file(s)`, not a claimed one) but never touches the second, since that write's own
+  checkpoint was never scoped to protect or restore a path it was never told to watch.
+  Policy denies and safe-stops the run, but does not itself clean up the escaping write.
+  This is a deliberate, narrow checkpoint scope (so two nodes with disjoint `writePaths`
+  can roll back independently, per D2), not a rollback bug, and it is exactly what makes
+  `write-paths-contract` a security boundary worth having rather than a formality: a
+  checkpoint cannot be relied on to undo a write it was never told to watch, which is why
+  the policy denial, not the checkpoint, is the control actually doing the work here.

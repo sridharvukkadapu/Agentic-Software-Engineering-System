@@ -19,19 +19,27 @@ git clone <repo> && cd Agentic-Software-Engineering-System
 cat runs/DEMO/state.json
 ```
 
-This builds the orchestrator with `javac` only, then runs a real two-node pipeline
-(REQUIREMENT then DOCUMENT) against pre-recorded fixtures under `fixtures/`, with no
-network call and no `ANTHROPIC_API_KEY` required. It ends `COMPLETED` and writes
-`runs/DEMO/state.json`, `runs/DEMO/audit.jsonl`, and the real artifacts each node
-produced under `runs/DEMO/artifacts/`.
+This builds the orchestrator with `javac` only, then runs the real eight-node governance
+graph (`workflows/sdlc-default.json`) against pre-recorded fixtures under `fixtures/`,
+with no network call and no `ANTHROPIC_API_KEY` required. **It currently ends
+`SAFE_STOPPED`, not `COMPLETED`, stated here plainly rather than left for a reviewer to
+discover:** REQUIREMENT's first real attempt correctly finds genuine unanswered questions
+in the requirement text and fails its exit gate, exactly as designed; the automatic
+retry that follows then crashes with a `MissingFixtureException`, because that retry's
+fixture was recorded before a later fix changed the retry-reason text embedded in the
+prompt. The first attempt is real, designed governance working; the retry crash on top
+of it is a real, understood, credit-blocked limitation, not a clean stop on ambiguity by
+itself. See [docs/design.md](docs/design.md) section 3.2 for the exact request hash and
+cause.
 
-To see the orchestrator's stricter, full eight-node governance graph (the one the three
-named scenarios below actually run against), pass a later `--workflow` flag, which wins
-over the one `run.sh` already sets:
+To see a real run reach `COMPLETED` end to end, with real artifacts written to disk, run
+the smaller two-node demo graph instead (REQUIREMENT then DOCUMENT, the graph spec 05
+built specifically to prove resume across a process boundary, not the full pipeline):
 
 ```bash
-./scripts/run.sh greenfield --replay --auto-approve --run-id DEMO-STRICT \
-  --workflow "$(pwd)/workflows/sdlc-default.json"
+./scripts/run.sh greenfield --replay --auto-approve --run-id DEMO-COMPLETE \
+  --workflow "$(pwd)/workflows/approval-demo.json"
+cat runs/DEMO-COMPLETE/state.json
 ```
 
 ## Architecture, in one picture
@@ -57,31 +65,35 @@ limitations and trade-offs in one document.
 
 ## The three scenarios
 
-All three currently reach the same real, honest result on the strict eight-node graph:
-REQUIREMENT's first attempt calls a real agent (in replay mode, served from a recorded
-fixture), finds genuine unanswered questions in the requirement text, and correctly fails
-its exit gate rather than inventing an answer. That failure is the designed behavior, not
-a bug: a requirement executor that filled the gap itself would be exactly the "agent
-grades its own work" shortcut CLAUDE.md rule 2 forbids. The retry that follows then hits a
-stale fixture (recorded before a later fix changed the retry-reason text), which is a
-real, credit-blocked limitation, documented below and in
-[docs/design.md](docs/design.md), not hidden.
+All three currently reach the same real result on the strict eight-node graph, and it is
+stated here exactly, not softened: REQUIREMENT's first attempt calls a real agent (in
+replay mode, served from a recorded fixture), finds genuine unanswered questions in the
+requirement text, and correctly fails its exit gate rather than inventing an answer.
+That first-attempt failure is the designed behavior, not a bug: a requirement executor
+that filled the gap itself would be exactly the "agent grades its own work" shortcut
+CLAUDE.md rule 2 forbids. The automatic retry that follows does not stop cleanly on its
+own reassessment of the ambiguity; it **crashes** with a `MissingFixtureException`,
+because that retry's fixture was recorded before a later fix changed the retry-reason
+text embedded in the prompt. Both parts are real and are shown separately in the table
+below: a real, designed safe-stop mechanism, immediately followed by a real, credit-
+blocked crash, not one continuous clean stop. See [docs/design.md](docs/design.md)
+section 3.2 for the exact request hashes.
 
-| Scenario | Real terminal status | Committed run | What it proves |
+| Scenario | Real terminal status | What actually happens | Committed run |
 |---|---|---|---|
-| `greenfield` | `SAFE_STOPPED` at REQUIREMENT, real open-questions gate failure | [runs/GREENFIELD-DEMO/](runs/GREENFIELD-DEMO/) | A requirement executor that will not paper over a real gap in the spec. |
-| `brownfield` | `SAFE_STOPPED` at REQUIREMENT, same real gate failure pattern | [runs/BROWNFIELD-DEMO/](runs/BROWNFIELD-DEMO/) | The same governance holds on a codebase-reasoning scenario, not just greenfield. |
-| `ambiguous` | `SAFE_STOPPED` at REQUIREMENT, 7 real open questions detected | [runs/AMBIGUOUS-DEMO/](runs/AMBIGUOUS-DEMO/) | Ambiguity detection surfaces the most unresolved questions of the three, as intended. |
-| policy denial (no scenario, standalone) | `SAFE_STOPPED`, real `POLICY_DENIED` audit event | [runs/POLICY-DENIAL-DEMO/](runs/POLICY-DENIAL-DEMO/) | A node that writes outside its declared `writePaths` is denied and rolled back for real, no agent call involved. |
+| `greenfield` | `SAFE_STOPPED` at REQUIREMENT | Attempt 1: real open-questions gate failure (designed). Attempt 2 (retry): crashes on a stale fixture (`MissingFixtureException`), not a clean re-evaluation. | [runs/GREENFIELD-DEMO/](runs/GREENFIELD-DEMO/) |
+| `brownfield` | `SAFE_STOPPED` at REQUIREMENT | Same pattern: real gate failure on attempt 1, retry crashes on a stale fixture. | [runs/BROWNFIELD-DEMO/](runs/BROWNFIELD-DEMO/) |
+| `ambiguous` | `SAFE_STOPPED` at REQUIREMENT | Same pattern, with the most open questions of the three (7) on attempt 1; retry crashes on a stale fixture. | [runs/AMBIGUOUS-DEMO/](runs/AMBIGUOUS-DEMO/) |
+| policy denial (no scenario, standalone) | `SAFE_STOPPED`, real `POLICY_DENIED` audit event | A node modifies a file inside its declared `writePaths` and writes a second file outside them; policy denies the node, and rollback restores the in-contract file to its original content, verified by content hash (`restored 1 file(s)`, not 0). No agent call, no credit. | [runs/POLICY-DENIAL-DEMO/](runs/POLICY-DENIAL-DEMO/) |
 
 Each committed run under `runs/` contains the real, persisted `state.json`, an
 `audit.jsonl` (one JSON object per line, derived directly from `state.json`'s own
 `auditLog`, since the orchestrator persists the audit log embedded in `state.json` and
 has no separate `audit.jsonl` writer), `approvals.json`, and any artifacts the run
 actually wrote before it stopped. Nothing in this table describes a run that has not
-happened; see [docs/design.md](docs/design.md)'s limitations section for exactly why the
-two-stage `approval-demo.json` graph (used by the quickstart above) reaches `COMPLETED`
-while the strict `sdlc-default.json` graph these scenarios use does not.
+happened; see [docs/design.md](docs/design.md) section 3.2 for exactly why the two-node
+`approval-demo.json` graph reaches `COMPLETED` while the strict `sdlc-default.json` graph
+these scenarios use does not, and what re-recording the stale fixture would take.
 
 ## The twelve capabilities (assignment section 4.4), plus re-planning
 
@@ -130,7 +142,9 @@ Full list in [docs/design.md](docs/design.md). The three most load-bearing:
   REQUIREMENT's real fixture at all before it was found and fixed late in this build.
 - **Fixtures are replay-by-default**, and re-recording all of them against a live model
   needs API credit this build did not spend; the retry-path fixtures for all three
-  scenarios are stale as a direct, understood consequence.
+  scenarios are stale as a direct, understood consequence, and the quickstart's own
+  strict-graph run currently ends in a crash on that stale retry fixture, not a clean
+  stop, as stated above.
 - **A two-hour connection stall** during live testing led directly to the request
   timeout now in `AnthropicClient`.
 

@@ -26,7 +26,7 @@ fi
 
 "$JAVA" -cp "$ROOT_DIR/orchestrator/out/main" com.schwab.agentic.cli.Main resume \
   --run-id "$RUN_ID" \
-  --workflow "$ROOT_DIR/workflows/approval-demo.json" \
+  --workflow "$ROOT_DIR/workflows/sdlc-default.json" \
   --runs "$ROOT_DIR/runs" \
   --fixtures "$ROOT_DIR/fixtures" \
   "$@"

@@ -243,67 +243,94 @@ public class WorkflowStateTest {
      * entry and the same audit log are genuinely contended. Verified to fail reliably
      * with synchronized removed before being written this way; see the session record.
      */
+    /**
+     * Runs the contention phase itself (fresh state, fresh thread pool) up to
+     * {@code maxAttempts} times, keeping the first attempt that actually observes a real
+     * race, rather than asserting a race on a single fixed run. Whether 32 threads racing
+     * 500 cycles each on 4 nodes actually collide even once is a function of the real
+     * scheduler and how quiet the machine is; on a fast, uncontended CI box or a quiet
+     * laptop, one run can legitimately interleave cleanly and see zero illegal
+     * transitions, which does not mean the synchronization guarantee is untested, only
+     * that this particular attempt did not happen to exercise it. Looping (bounded, so a
+     * genuinely broken lock still fails loudly instead of spinning forever) is what turns
+     * "contention was not observed this time" into "contention could not be forced even
+     * after repeated tries," which is the only version of that finding actually worth
+     * failing the build over.
+     */
     public void testConcurrentTransitionsUnderHeavyContentionProduceAConsistentAuditLog() throws InterruptedException {
         int nodeCount = 4;
         int threadsPerNode = 8;
         int cyclesPerThread = 500;
+        int maxAttempts = 5;
 
-        List<WorkflowNode> nodes = new java.util.ArrayList<>();
-        for (int i = 0; i < nodeCount; i++) {
-            nodes.add(TestFixtures.node("N" + i));
-        }
-        WorkflowState state = new WorkflowState("RUN-1", TestFixtures.requirementSpec(), nodes);
+        WorkflowState state = null;
+        int observedIllegalTransitionCount = 0;
 
-        int totalThreads = nodeCount * threadsPerNode;
-        ExecutorService pool = Executors.newFixedThreadPool(totalThreads);
-        CountDownLatch startLatch = new CountDownLatch(1);
-        CountDownLatch doneLatch = new CountDownLatch(totalThreads);
-        AtomicInteger observedIllegalTransitions = new AtomicInteger(0);
+        for (int attempt = 1; attempt <= maxAttempts && observedIllegalTransitionCount == 0; attempt++) {
+            List<WorkflowNode> nodes = new java.util.ArrayList<>();
+            for (int i = 0; i < nodeCount; i++) {
+                nodes.add(TestFixtures.node("N" + i));
+            }
+            state = new WorkflowState("RUN-1", TestFixtures.requirementSpec(), nodes);
 
-        for (int t = 0; t < totalThreads; t++) {
-            String nodeId = "N" + (t % nodeCount);
-            pool.submit(() -> {
-                try {
-                    startLatch.await();
-                    for (int cycle = 0; cycle < cyclesPerThread; cycle++) {
-                        try {
-                            state.transition(nodeId, NodeStatus.RUNNING, "system", "cycle start");
-                            state.transition(nodeId, NodeStatus.FAILED, "system", "cycle fail");
-                            state.transition(nodeId, NodeStatus.PENDING, "system", "cycle retry");
-                        } catch (IllegalStateException raceLost) {
-                            // Another thread's transition on the same node interleaved with this
-                            // one: expected under contention, since only one thread can legally
-                            // advance a given node at a time. Counted, not treated as a failure by
-                            // itself; what matters is whether the audit log stays consistent.
-                            observedIllegalTransitions.incrementAndGet();
+            int totalThreads = nodeCount * threadsPerNode;
+            ExecutorService pool = Executors.newFixedThreadPool(totalThreads);
+            CountDownLatch startLatch = new CountDownLatch(1);
+            CountDownLatch doneLatch = new CountDownLatch(totalThreads);
+            AtomicInteger observedIllegalTransitions = new AtomicInteger(0);
+            WorkflowState attemptState = state;
+
+            for (int t = 0; t < totalThreads; t++) {
+                String nodeId = "N" + (t % nodeCount);
+                pool.submit(() -> {
+                    try {
+                        startLatch.await();
+                        for (int cycle = 0; cycle < cyclesPerThread; cycle++) {
+                            try {
+                                attemptState.transition(nodeId, NodeStatus.RUNNING, "system", "cycle start");
+                                attemptState.transition(nodeId, NodeStatus.FAILED, "system", "cycle fail");
+                                attemptState.transition(nodeId, NodeStatus.PENDING, "system", "cycle retry");
+                            } catch (IllegalStateException raceLost) {
+                                // Another thread's transition on the same node interleaved with
+                                // this one: expected under contention, since only one thread can
+                                // legally advance a given node at a time. Counted, not treated as
+                                // a failure by itself; what matters is whether the audit log
+                                // stays consistent.
+                                observedIllegalTransitions.incrementAndGet();
+                            }
                         }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    } finally {
+                        doneLatch.countDown();
                     }
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                } finally {
-                    doneLatch.countDown();
-                }
-            });
+                });
+            }
+
+            startLatch.countDown();
+            boolean finished = doneLatch.await(30, TimeUnit.SECONDS);
+            pool.shutdown();
+            assertTrue(finished, "all concurrent transitions must complete within the timeout (attempt " + attempt + ")");
+
+            observedIllegalTransitionCount = observedIllegalTransitions.get();
+
+            List<AuditEvent> log = attemptState.getAuditLog();
+            List<Long> sequences = log.stream().map(AuditEvent::sequence).collect(Collectors.toList());
+            List<Long> sortedUnique = sequences.stream().distinct().sorted().collect(Collectors.toList());
+            assertEquals(sequences.size(), sortedUnique.size(),
+                "sequence numbers must be unique under heavy contention (attempt " + attempt + "), found "
+                    + sequences.size() + " events but only " + sortedUnique.size() + " unique sequence numbers");
+            for (int i = 0; i < sequences.size(); i++) {
+                assertEquals((long) (i + 1), sortedUnique.get(i),
+                    "sequence numbers must be contiguous starting at 1 with no gaps under heavy contention (attempt "
+                        + attempt + ")");
+            }
         }
 
-        startLatch.countDown();
-        boolean finished = doneLatch.await(30, TimeUnit.SECONDS);
-        pool.shutdown();
-        assertTrue(finished, "all concurrent transitions must complete within the timeout");
-        assertTrue(observedIllegalTransitions.get() > 0,
-            "expected genuine contention: multiple threads racing the same node's transitions"
-                + " should cause some of them to lose the race and see an illegal transition");
-
-        List<AuditEvent> log = state.getAuditLog();
-        List<Long> sequences = log.stream().map(AuditEvent::sequence).collect(Collectors.toList());
-        List<Long> sortedUnique = sequences.stream().distinct().sorted().collect(Collectors.toList());
-        assertEquals(sequences.size(), sortedUnique.size(),
-            "sequence numbers must be unique under heavy contention, found " + sequences.size()
-                + " events but only " + sortedUnique.size() + " unique sequence numbers");
-        for (int i = 0; i < sequences.size(); i++) {
-            assertEquals((long) (i + 1), sortedUnique.get(i),
-                "sequence numbers must be contiguous starting at 1 with no gaps under heavy contention");
-        }
+        assertTrue(observedIllegalTransitionCount > 0,
+            "expected genuine contention within " + maxAttempts + " attempts: multiple threads racing the same"
+                + " node's transitions should eventually cause some of them to lose the race and see an illegal"
+                + " transition");
     }
 
     public void testReplaceRequirementSpecRejectsNonIncreasingRevision() {
