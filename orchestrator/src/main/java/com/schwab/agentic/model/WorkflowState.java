@@ -208,6 +208,47 @@ public final class WorkflowState {
         this.requirementSpec = updated;
     }
 
+    /**
+     * Adopts REQUIREMENT's real, freshly-produced output as this run's actual
+     * requirement spec, replacing the placeholder {@link com.schwab.agentic.cli.Main}
+     * constructs before REQUIREMENT has ever run (id {@code "REQ-<runId>"}, revision 1,
+     * {@code rawText} the literal sentinel {@code "placeholder pending
+     * RequirementExecutor"}, no acceptance criteria).
+     *
+     * This is not an amendment: {@link #replaceRequirementSpec} is Replanner's job when a
+     * requirement changes mid-run, and it enforces a strictly increasing revision so a
+     * stale approval or piece of evidence stays detectable. This method fills in this
+     * run's own state for the first time, at the same revision, with what REQUIREMENT
+     * actually determined. Without it, every gate that reads {@link #getRequirementSpec}
+     * (in particular the {@code requirement-unambiguous-or-approved} gate DESIGN depends
+     * on) would see the placeholder's empty {@code acceptanceCriteria} forever on an
+     * ordinary run, since nothing else on that path ever updates it: REQUIREMENT writes
+     * its real output only to {@code requirement-spec.json} on disk, which this run's own
+     * in-memory {@code WorkflowState} never otherwise reads.
+     *
+     * {@code id} and {@code revision} are kept from the current (placeholder) spec rather
+     * than taken from the artifact, since the artifact's own id
+     * ({@code RequirementExecutor}'s {@code "REQ-" + node.id()}, always literally
+     * {@code "REQ-REQUIREMENT"}) is not run-specific, and the run's revision counter is
+     * this state's own to own, not an executor's.
+     *
+     * Only legal once, when the current spec is still exactly that placeholder:
+     * REQUIREMENT can complete at most once per run without a re-plan, and a re-plan's own
+     * amendment goes through {@link #replaceRequirementSpec} instead.
+     */
+    public synchronized void adoptRequirementSpecFromCompletedRequirement(String requirementSpecJson) {
+        if (!"placeholder pending RequirementExecutor".equals(requirementSpec.rawText())) {
+            throw new IllegalStateException(
+                "adoptRequirementSpecFromCompletedRequirement must only be called once, against the placeholder"
+                    + " spec Main.java constructs before REQUIREMENT ever runs; this state's requirement spec is"
+                    + " already real (rawText: " + requirementSpec.rawText() + ")");
+        }
+        @SuppressWarnings("unchecked")
+        RequirementSpec real = requirementSpecFromJson((Map<String, Object>) Json.parse(requirementSpecJson));
+        this.requirementSpec = new RequirementSpec(requirementSpec.id(), requirementSpec.revision(),
+            real.rawText(), real.normalizedProblem(), real.acceptanceCriteria());
+    }
+
     /** The immutable definition of a node: id, dependencies, gates, risk, and so on. */
     public WorkflowNode getNode(String nodeId) {
         WorkflowNode node = nodeDefinitions.get(nodeId);

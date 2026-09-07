@@ -8,6 +8,8 @@ import static com.schwab.agentic.Assertions.assertTrue;
 import com.schwab.agentic.graph.WorkflowGraph;
 import com.schwab.agentic.model.AuditEvent;
 import com.schwab.agentic.model.NodeStatus;
+import com.schwab.agentic.model.RequirementSpec;
+import com.schwab.agentic.model.RiskLevel;
 import com.schwab.agentic.model.WorkflowNode;
 import com.schwab.agentic.model.WorkflowState;
 import com.schwab.agentic.model.WorkflowStatus;
@@ -506,6 +508,71 @@ public class WorkflowEngineTest {
 
         assertEquals(NodeStatus.FAILED, state.getStatus("N1"),
             "an executor that reports success but produces no artifact must still fail the exit gate");
+    }
+
+    /**
+     * Reproduces the real bug found running a real live scenario through the CLI:
+     * REQUIREMENT completing for real, with real acceptance criteria, did not unblock
+     * DESIGN, because {@code RequirementUnambiguousOrApprovedGate} reads
+     * {@link WorkflowState#getRequirementSpec}, and nothing on the ordinary run path ever
+     * replaced the placeholder spec {@code Main.java} constructs before REQUIREMENT runs
+     * with what REQUIREMENT actually produced on disk. Every other test that reaches
+     * DESIGN either uses the weaker {@code artifact-written} entry gate (the two-node demo
+     * graph) or hand-builds a {@code WorkflowState} whose requirement spec already has
+     * criteria, so this exact real gap had no test until now.
+     *
+     * This builds the same two real gate names {@code sdlc-default.json} declares for this
+     * edge ({@code requirement-complete} exiting REQUIREMENT,
+     * {@code requirement-unambiguous-or-approved} entering DESIGN), starts the state with
+     * the exact placeholder {@code Main.java} constructs, and has REQUIREMENT's controllable
+     * executor write a real {@code requirement-spec.json} with non-empty acceptance
+     * criteria, exactly like {@code RequirementExecutor}'s real output. If the fix were
+     * absent, DESIGN's entry gate would fail forever (zero criteria, no ambiguity-resolution
+     * decision), the run would safe-stop with DESIGN stuck PENDING, and this test would fail.
+     */
+    public void testRequirementCompletingForRealUnblocksDesignsRequirementUnambiguousGate() throws IOException {
+        Path tempDir = Files.createTempDirectory("engine-test-requirement-design");
+        Path requirementSpecPath = tempDir.resolve("requirement-spec.json");
+        Files.writeString(requirementSpecPath, """
+            {
+              "id": "REQ-REQUIREMENT",
+              "revision": 1.0,
+              "rawText": "Add idempotency keys to the create endpoint.",
+              "normalizedProblem": "Add idempotency keys to the create endpoint.",
+              "acceptanceCriteria": [
+                {"id": "AC-1", "description": "A repeated request with the same key returns the same result.", "riskLevel": "HIGH"}
+              ]
+            }
+            """);
+
+        WorkflowNode requirementNode = new WorkflowNode("REQUIREMENT", "REQUIREMENT", "controllable", Set.of(),
+            "dependencies-complete", "requirement-complete", RiskLevel.LOW, 1, Set.of());
+        WorkflowNode designNode = new WorkflowNode("DESIGN", "DESIGN", "controllable", Set.of("REQUIREMENT"),
+            "requirement-unambiguous-or-approved", "artifact-written", RiskLevel.MEDIUM, 1, Set.of());
+        WorkflowGraph graph = WorkflowGraph.of(List.of(requirementNode, designNode));
+
+        RequirementSpec placeholderSpec = new RequirementSpec("REQ-RUN-1", 1,
+            "placeholder pending RequirementExecutor", "placeholder", List.of());
+        WorkflowState state = new WorkflowState("RUN-1", placeholderSpec, graph.getAllNodes());
+
+        ControllableExecutor executor = new ControllableExecutor();
+        executor.alwaysReturn("REQUIREMENT",
+            ControllableExecutor.Outcome.success("requirement normalized", requirementSpecPath,
+                Files.readString(requirementSpecPath)));
+        executor.alwaysReturn("DESIGN",
+            ControllableExecutor.Outcome.success("design written", tempDir.resolve("design-spec.json"), "{}"));
+
+        WorkflowEngine engine = buildEngine(graph, state, executor, tempDir, null);
+        WorkflowStatus outcome = engine.run();
+
+        assertEquals(WorkflowStatus.COMPLETED, outcome,
+            "REQUIREMENT's real acceptance criteria must unblock DESIGN's entry gate");
+        assertEquals(NodeStatus.COMPLETED, state.getStatus("DESIGN"),
+            "DESIGN must actually run and complete, not stay blocked behind a stale placeholder requirement spec");
+        assertEquals(1, state.getRequirementSpec().acceptanceCriteria().size(),
+            "the run's own requirement spec must reflect REQUIREMENT's real output, not the placeholder's empty list");
+        assertEquals("AC-1", state.getRequirementSpec().acceptanceCriteria().get(0).id(),
+            "the adopted criterion must be the one REQUIREMENT actually wrote, not an invented one");
     }
 
     private static ControllableExecutor.Invocation findInvocation(

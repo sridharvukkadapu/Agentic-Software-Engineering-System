@@ -467,6 +467,7 @@ public final class WorkflowEngine {
         Gate.Result exitResult = evaluateExitGate(node, output.outputs());
 
         if (exitResult.passed()) {
+            adoptRequirementSpecIfThisIsRequirement(node, output.outputs());
             state.transition(node.id(), NodeStatus.COMPLETED, "engine",
                 "exit gate passed: " + exitResult.reason());
             return;
@@ -498,6 +499,42 @@ public final class WorkflowEngine {
         } else {
             rollBackAndFail(node, exitResult.reason());
         }
+    }
+
+    /**
+     * REQUIREMENT is the one node whose real output this run's own {@link WorkflowState}
+     * must adopt as its requirement spec, since every downstream gate that reads
+     * {@link WorkflowState#getRequirementSpec} (in particular
+     * {@code requirement-unambiguous-or-approved}, which DESIGN depends on) reads that
+     * in-memory value, not the {@code requirement-spec.json} file REQUIREMENT actually
+     * wrote. Without this, a real run's requirement spec stays the placeholder
+     * {@code Main.java} constructs before REQUIREMENT ever runs (empty acceptance
+     * criteria) forever, so DESIGN sees zero criteria and its entry gate blocks it even
+     * after REQUIREMENT genuinely completed. Called from every path that can transition
+     * REQUIREMENT to COMPLETED (the ordinary exit-gate pass and the fallback-success
+     * path), before that transition, so the real spec is in place before any later node
+     * in the same wave is admitted.
+     *
+     * A no-op for every node other than REQUIREMENT: nothing else produces a
+     * requirement-spec.json, and nothing else should ever be interpreted as one.
+     */
+    private void adoptRequirementSpecIfThisIsRequirement(WorkflowNode node, Map<String, Object> outputs) {
+        if (!"REQUIREMENT".equals(node.id())) {
+            return;
+        }
+        Object artifactPathValue = outputs.get("artifactPath");
+        if (!(artifactPathValue instanceof String artifactPathString)) {
+            return;
+        }
+        String requirementSpecJson;
+        try {
+            requirementSpecJson = Files.readString(Path.of(artifactPathString));
+        } catch (IOException e) {
+            throw new UncheckedIOException(
+                "REQUIREMENT's exit gate passed but its own reported artifact could not be read: "
+                    + artifactPathString, e);
+        }
+        state.adoptRequirementSpecFromCompletedRequirement(requirementSpecJson);
     }
 
     /**
@@ -568,6 +605,7 @@ public final class WorkflowEngine {
         Gate.Result exitResult = evaluateExitGate(node, fallbackOutput.outputs());
 
         if (exitResult.passed()) {
+            adoptRequirementSpecIfThisIsRequirement(node, fallbackOutput.outputs());
             state.transition(node.id(), NodeStatus.COMPLETED, "engine",
                 "fallback executor's output passed the exit gate: " + exitResult.reason());
             state.record(AuditEvent.EventType.ARTIFACT_WRITTEN, "engine",
