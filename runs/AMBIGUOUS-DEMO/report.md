@@ -9,7 +9,7 @@
 | Retry frequency (per attempted node) | 1.00 |
 | Rollback count | 0 |
 | Rollback frequency (per node) | 0.00 |
-| End-to-end latency | 0.232s |
+| End-to-end latency | 0.246s |
 | MTTR | null (no node needed more than one attempt) |
 | Unrecovered nodes (failed, never later completed) | REQUIREMENT |
 
@@ -20,20 +20,20 @@ flowchart TD
     REQUIREMENT["REQUIREMENT (FAILED)"]
     IMPACT["IMPACT (PENDING)"]
     DESIGN["DESIGN (PENDING)"]
-    DOCUMENT["DOCUMENT (PENDING)"]
-    IMPLEMENT["IMPLEMENT (PENDING)"]
     TEST["TEST (PENDING)"]
+    IMPLEMENT["IMPLEMENT (PENDING)"]
+    DOCUMENT["DOCUMENT (PENDING)"]
     VALIDATE["VALIDATE (PENDING)"]
     RELEASE["RELEASE (PENDING)"]
     IMPACT --> DESIGN
-    DESIGN --> DOCUMENT
-    VALIDATE --> RELEASE
-    TEST --> VALIDATE
-    IMPLEMENT --> VALIDATE
-    DOCUMENT --> VALIDATE
-    REQUIREMENT --> IMPACT
-    DESIGN --> IMPLEMENT
     DESIGN --> TEST
+    DESIGN --> IMPLEMENT
+    REQUIREMENT --> IMPACT
+    DOCUMENT --> VALIDATE
+    IMPLEMENT --> VALIDATE
+    TEST --> VALIDATE
+    VALIDATE --> RELEASE
+    DESIGN --> DOCUMENT
 ```
 
 ## Traceability matrix

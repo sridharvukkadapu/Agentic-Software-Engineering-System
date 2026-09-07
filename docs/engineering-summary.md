@@ -37,12 +37,15 @@ constructs an object and asserts a field.
   `orchestrator/src/test/java/com/schwab/agentic/tools/PolicyDenialDemoRunner.java`),
   showing a real `POLICY_DENIED` audit event and a real, verified rollback with no agent
   call involved.
-- **Ten real, live-recorded fixtures** under `fixtures/`, produced by
+- **Real, live-recorded fixtures** under `fixtures/`, produced by
   `orchestrator/src/main/java/com/schwab/agentic/tools/FixtureRecorder.java` against the
-  real Anthropic API (documented in `docs/decisions.md` D6-D7), six of which are
-  currently stale relative to `target-service`'s post-spec-07 file layout (see
-  [design.md](design.md) section 3.2) and would need one credited re-recording pass to
-  refresh.
+  real Anthropic API. Re-recorded in full once credit became available: `greenfield`'s
+  requirement was re-recorded live twice more, in direct response to its own gate's
+  feedback (see the requirement-gate finding below), and the impact-through-document
+  chain was re-recorded live end to end after fixing a real reproducibility gap
+  (`.gradle/` leaking into IMPACT's file inventory, [design.md](design.md) section
+  3.2c) found by comparing a local checkout against a fresh clone before spending
+  anything.
 - **This documentation set**: [README.md](../README.md) (the twelve-plus-one capability
   table), [design.md](design.md) (architecture, testing, limitations, trade-offs), and
   `docs/decisions.md` (the day-by-day record of specific defects found and fixed as the
@@ -50,19 +53,37 @@ constructs an object and asserts a field.
 
 ## Risks and trade-offs
 
-The most consequential trade-offs are recorded in [design.md](design.md) section 4; the
-short version: the CLI's default demo graph is deliberately small because spec 05's
-actual target (proving resume across a process boundary) did not need the full pipeline,
-and a real, successful full-pipeline live run (D7) is not reproducible from a fresh clone
-today because two later, independent, and necessary changes (spec 07's package
-restructure, the spec 09 CLI routing fix) each invalidated a different real fixture by
-changing what a real request hashes to. Neither was reverted to keep old fixtures valid;
-a fixture that constrains real code changes has stopped serving its purpose.
+The most consequential finding, not merely a trade-off, is recorded in full in
+[design.md](design.md) section 3.2: REQUIREMENT's exit gate (zero open questions) is, in
+practice, unsatisfiable against a sufficiently capable, honest model. Verified live,
+twice: amending `greenfield`'s requirement to answer five genuine gaps a live retry
+found led directly to a second live retry finding six more. This is reported as a
+finding about the exit criterion, not a defect in the retry mechanism or an unlucky
+model, and a better gate (classifying open questions as blocking or non-blocking, and
+passing on zero blocking ones) is named in design.md rather than implemented, since
+changing the gate after finding it does not pass would read exactly as loosening a
+control to force green, which is the one thing this project's principles rule out.
+
+Separately, re-recording the rest of the chain live found a second, independent real
+stopping point: TEST's written test did not compile or pass against `target-service`'s
+real build, on either of two live attempts, even though IMPACT, DESIGN, and IMPLEMENT
+each passed their own real gates on the first attempt. This is left as a real, honest
+result rather than forced past with a third attempt.
+
+The CLI's two-node demo graph remains deliberately small: spec 05's actual target
+(proving resume across a process boundary) did not need the full pipeline, and it is now
+a dedicated, isolated smoke test (`scenarios/_smoke/`), decoupled from any real
+scenario's content after a scenario amendment was found to silently break it
+([design.md](design.md) section 3.1b).
 
 The largest unmitigated risk is that no committed run currently demonstrates the full
-eight-node pipeline reaching RELEASE COMPLETED from a fresh clone, only that it did once
-(D7), under conditions that have since changed. This is stated here directly rather than
-implied by omission.
+eight-node pipeline reaching RELEASE COMPLETED, because REQUIREMENT's own gate does not
+pass for any of the three scenarios today, for the reason above, and TEST's gate does
+not pass either once REQUIREMENT is bypassed for testing purposes. Both are real,
+verified, live findings, not something a further re-recording pass would necessarily
+resolve, since the requirement-gate finding suggests the criterion itself, not the
+fixture, is what needs to change. This is stated here directly rather than implied by
+omission.
 
 ## Validation approach
 
@@ -111,9 +132,10 @@ stand-in, was actually behind the wheel.
 ## What was cut for time, and why
 
 - **`amend` and `report` CLI subcommands were declared before they were implemented**,
-  printing "not yet implemented" until specs 06 and 08 respectively built them out, so
-  the CLI's real surface area was visible from spec 05 onward rather than appearing all
-  at once.
+  printing "not yet implemented" until specs 06 and 08 respectively built them out
+  (`report` was wired later still, after spec 09, since building `RunMetrics`/`RunReport`
+  and exposing them through the CLI were treated as separate steps), so the CLI's real
+  surface area was visible from spec 05 onward rather than appearing all at once.
 - **Rate limiting, SSRF validation, idempotency keys, and OpenAPI configuration were
   explicitly cut from target-service's spec 07 scope.** None of these bear on what the
   assignment scores (the orchestration layer), and building them would have spent session
@@ -126,9 +148,16 @@ stand-in, was actually behind the wheel.
   05**, once it became clear that spec 05's actual acceptance criteria (resume survives
   a real process boundary) did not require it; building it anyway would have been scope
   creep against that spec's own stated goal, not diligence.
-- **A full second live-recording pass to refresh the six stale post-spec-07 fixtures
-  was not attempted**, since the account behind `ANTHROPIC_API_KEY` in this environment
-  currently has no credit, confirmed directly against the real API
-  (`AnthropicClientTest.testLiveCallAgainstTheRealApiReturnsText`) rather than assumed.
-  `FixtureRecorder --only-*` flags exist specifically so this re-recording, once
-  possible, costs credit only on the affected stages.
+- **The requirement-gate finding was not chased past two live amendments.** Once a
+  second live retry found a sixth layer of genuine ambiguity, a third amendment was
+  deliberately not attempted: the pattern (close a layer, find another) was already
+  established by two independent live runs, and continuing would have spent credit
+  re-confirming a result already demonstrated rather than learning anything new.
+  `FixtureRecorder --only-*` flags exist specifically so a future re-recording, if
+  pursued, costs credit only on the affected stages.
+- **The hardcoded-literal test staleness in `GreenfieldEndToEndTest` (design.md section
+  3.2a) was not fixed.** Several unit tests construct their own literal
+  `normalizedProblem`/`impactSummary` strings to call IMPACT/DESIGN/IMPLEMENT directly,
+  predating this session's requirement amendments; updating each to the current real
+  text is a mechanical synchronization task that does not change what the system
+  demonstrates, so it was named as a finding rather than spent time on.

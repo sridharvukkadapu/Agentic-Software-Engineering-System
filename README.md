@@ -48,13 +48,10 @@ cat runs/DEMO-REAL/state.json
 This currently ends `SAFE_STOPPED`, not `COMPLETED`, stated here plainly rather than left
 for a reviewer to discover: REQUIREMENT's first real attempt correctly finds genuine
 unanswered questions in the requirement text and fails its exit gate, exactly as
-designed. The automatic retry that follows then **crashes** with a
-`MissingFixtureException`, because that retry's fixture was recorded before a later fix
-changed the retry-reason text embedded in the prompt. The first attempt is real, designed
-governance working as intended; the retry crash on top of it is a real, credit-blocked
-limitation, not designed behavior, and the two should not be read as one continuous clean
-stop. See [docs/design.md](docs/design.md) section 3.2 for the exact request hash and
-cause.
+designed. The automatic retry, told that failure reason, answers it and finds a
+different, new layer of genuine ambiguity underneath, verified live and detailed in the
+next section. This is not a bug or a stale fixture: it is a real, live model correctly
+refusing to guess at a policy the requirement never states, twice in a row.
 
 **3. The run report.** Renders the section 4.4 reliability metrics (success rate, retry
 and rollback frequency, MTTR, end-to-end latency), a Mermaid graph of the workflow with
@@ -93,34 +90,40 @@ limitations and trade-offs in one document.
 ## The three scenarios
 
 All three currently reach the same real result on the strict eight-node graph, and it is
-stated here exactly, not softened: REQUIREMENT's first attempt calls a real agent (in
-replay mode, served from a recorded fixture), finds genuine unanswered questions in the
-requirement text, and correctly fails its exit gate rather than inventing an answer.
-That first-attempt failure is the designed behavior, not a bug: a requirement executor
-that filled the gap itself would be exactly the "agent grades its own work" shortcut
-CLAUDE.md rule 2 forbids. The automatic retry that follows does not stop cleanly on its
-own reassessment of the ambiguity; it **crashes** with a `MissingFixtureException`,
-because that retry's fixture was recorded before a later fix changed the retry-reason
-text embedded in the prompt. Both parts are real and are shown separately in the table
-below: a real, designed safe-stop mechanism, immediately followed by a real, credit-
-blocked crash, not one continuous clean stop. See [docs/design.md](docs/design.md)
-section 3.2 for the exact request hashes.
+the strongest, not the weakest, evidence in this repository. REQUIREMENT's first attempt
+calls a real agent, finds genuine unanswered questions in the requirement text, and
+correctly fails its exit gate rather than inventing an answer, exactly as CLAUDE.md rule
+2 requires. The automatic retry, told that failure reason, answers it and finds a new,
+different layer of genuine ambiguity underneath. Told about *that* failure, another retry
+does the same again. This was verified twice, live, in direct response to the gate's own
+feedback (amend the requirement to answer what it asked, re-record, see what a live model
+says next), not assumed or engineered: closing five real gaps in `greenfield`'s
+requirement surfaced six more. REQUIREMENT exhausts its two-attempt budget against
+ambiguity that a bounded retry budget cannot resolve, because resolving it needs a human
+decision, not another model pass, and the run safe-stops cleanly rather than guessing.
+That is the `ambiguous` scenario's own thesis, demonstrated live inside `greenfield` too.
+Full detail, including both live runs' actual open questions, is in
+[docs/design.md](docs/design.md) section 3.2.
+
+Separately, re-recording the rest of the chain (IMPACT through DOCUMENT, live) found a
+second, independent real stopping point: TEST's written test genuinely did not compile
+or pass, on either attempt. IMPACT, DESIGN, and IMPLEMENT all passed their real gates on
+the first live attempt (a real diff that actually compiles against `target-service`).
+See [docs/design.md](docs/design.md) section 3.2a.
 
 | Scenario | Real terminal status | What actually happens | Committed run |
 |---|---|---|---|
-| `greenfield` | `SAFE_STOPPED` at REQUIREMENT | Attempt 1: real open-questions gate failure (designed). Attempt 2 (retry): crashes on a stale fixture (`MissingFixtureException`), not a clean re-evaluation. | [runs/GREENFIELD-DEMO/](runs/GREENFIELD-DEMO/) |
-| `brownfield` | `SAFE_STOPPED` at REQUIREMENT | Same pattern: real gate failure on attempt 1, retry crashes on a stale fixture. The defect it reports is really present in `target-service`, planted in its own labelled commit (`Seed the brownfield regression`), so the codebase reasoning this scenario asks for has real code to find. | [runs/BROWNFIELD-DEMO/](runs/BROWNFIELD-DEMO/) |
-| `ambiguous` | `SAFE_STOPPED` at REQUIREMENT | Same pattern, with the most open questions of the three (7) on attempt 1; retry crashes on a stale fixture. | [runs/AMBIGUOUS-DEMO/](runs/AMBIGUOUS-DEMO/) |
-| policy denial (no scenario, standalone) | `SAFE_STOPPED`, real `POLICY_DENIED` audit event | A node modifies a file inside its declared `writePaths` and writes a second file outside them; policy denies the node, and rollback restores the in-contract file to its original content, verified by content hash (`restored 1 file(s)`, not 0). No agent call, no credit. | [runs/POLICY-DENIAL-DEMO/](runs/POLICY-DENIAL-DEMO/) |
+| `greenfield` | `SAFE_STOPPED` at REQUIREMENT | Attempt 1: 6 genuine open questions (after an earlier amendment already closed 5 others found by a prior live pass, see docs/design.md 3.2). Attempt 2 (retry): essentially the same 6, not resolved. | [runs/GREENFIELD-DEMO/](runs/GREENFIELD-DEMO/) |
+| `brownfield` | `SAFE_STOPPED` at REQUIREMENT | Same pattern: real gate failure on attempt 1, real unresolved ambiguity on the retry. The defect it reports is really present in `target-service`, planted in its own labelled commit (`Seed the brownfield regression`), so the codebase reasoning this scenario asks for has real code to find. | [runs/BROWNFIELD-DEMO/](runs/BROWNFIELD-DEMO/) |
+| `ambiguous` | `SAFE_STOPPED` at REQUIREMENT | Same pattern, with the most open questions of the three on attempt 1. | [runs/AMBIGUOUS-DEMO/](runs/AMBIGUOUS-DEMO/) |
+| policy denial (no scenario, standalone) | `SAFE_STOPPED`, real `POLICY_DENIED` audit event | A node modifies a file inside its declared `writePaths` and writes a second file outside them; policy denies the node, and rollback restores the in-contract file to its original content, verified by content hash (`restored 1 file(s)`, not 0). No agent call needed. | [runs/POLICY-DENIAL-DEMO/](runs/POLICY-DENIAL-DEMO/) |
 
 Each committed run under `runs/` contains the real, persisted `state.json`, an
 `audit.jsonl` (one JSON object per line, derived directly from `state.json`'s own
 `auditLog`, since the orchestrator persists the audit log embedded in `state.json` and
 has no separate `audit.jsonl` writer), `approvals.json`, a `report.md` generated by
 `./scripts/report.sh`, and any artifacts the run actually wrote before it stopped.
-Nothing in this table describes a run that has not happened; see [docs/design.md](docs/design.md) section 3.2 for exactly why the two-node
-`approval-demo.json` graph reaches `COMPLETED` while the strict `sdlc-default.json` graph
-these scenarios use does not, and what re-recording the stale fixture would take.
+Nothing in this table describes a run that has not happened.
 
 ## The twelve capabilities (assignment section 4.4), plus re-planning
 
@@ -134,7 +137,7 @@ removed or bypassed, which is the strongest evidence this repo has for that row.
 | 1 | Explicit dependency graph between stages | [orchestrator/src/main/java/com/schwab/agentic/graph/WorkflowGraph.java](orchestrator/src/main/java/com/schwab/agentic/graph/WorkflowGraph.java) (topological order, `readyNodes`) | `WorkflowGraphTest.testReadyNodesAfterDesignCompletesReturnsImplementTestAndDocumentTogether` |
 | 2 | Entry and exit gates per stage | [orchestrator/src/main/java/com/schwab/agentic/engine/Gates.java](orchestrator/src/main/java/com/schwab/agentic/engine/Gates.java), invoked from `WorkflowEngine.admitReadyNodes` (entry) and `evaluateExitGate` (exit) | `WorkflowEngineTest.testExecutorSucceedingButExitGateFailingEndsAsFailedNotCompleted` (exit gate overrides the executor's own success claim); entry-gate blocking is exercised by `WorkflowGraphTest`'s `readyNodes` tests |
 | 3 | Sequential and parallel execution paths with synchronization | [orchestrator/src/main/java/com/schwab/agentic/engine/WorkflowEngine.java](orchestrator/src/main/java/com/schwab/agentic/engine/WorkflowEngine.java) (`executeWaveAndWaitForAll`) | `WorkflowEngineTest.testThreeParallelNodesAllReachCompletedBeforeTheJoinNodeStartsAndAuditLogProvesIt` |
-| 4 | Cross-stage context preservation | `WorkflowEngine.withInitialContext` (`initialContextByNodeId`), wired in [orchestrator/src/main/java/com/schwab/agentic/cli/Main.java](orchestrator/src/main/java/com/schwab/agentic/cli/Main.java) | `MainCliResumeTest.testRunApproveAndResumeEachCrossARealProcessBoundaryAndTheRunCompletes`, currently passing. `MainCliFullPipelineTest.testRunReachesCompletedWithAllEightNodesCompletedAcrossARealCliSubprocess` is the stronger, full-eight-node proof of this same mechanism, but is currently failing for a reason unrelated to context threading itself (a stale post-spec-07 fixture, see [docs/design.md](docs/design.md) section 3.2), not a regression in the mechanism this row claims |
+| 4 | Cross-stage context preservation | `WorkflowEngine.withInitialContext` (`initialContextByNodeId`), wired in [orchestrator/src/main/java/com/schwab/agentic/cli/Main.java](orchestrator/src/main/java/com/schwab/agentic/cli/Main.java) | `MainCliResumeTest.testRunApproveAndResumeEachCrossARealProcessBoundaryAndTheRunCompletes`, currently passing. `MainCliFullPipelineTest.testRunReachesCompletedWithAllEightNodesCompletedAcrossARealCliSubprocess` is the stronger, full-eight-node proof of this same mechanism, but is currently failing for a reason unrelated to context threading itself: REQUIREMENT does not reach COMPLETED for this scenario at all right now (see the three scenarios section above and [docs/design.md](docs/design.md) section 3.2), not a regression in the mechanism this row claims |
 | 5 | Decision lineage | [orchestrator/src/main/java/com/schwab/agentic/model/DecisionRecord.java](orchestrator/src/main/java/com/schwab/agentic/model/DecisionRecord.java), recorded via `WorkflowState` | `DesignExecutorTest.testDesignProducesArtifactsAndRecordsADecisionWithARejectedAlternative` |
 | 6 | Human approval checkpoints | `WorkflowEngine.approve`/`deny`, gated by `RealPolicyEngine`'s `critical-risk-requires-approval` and `high-risk-requires-approval` rules | `WorkflowEngineTest.testApprovedNodeReturnsToPendingBeforeRunningNeverDirectlyFromWaitingApproval` |
 | 7 | Bounded retries | `WorkflowEngine.runAttemptsUntilOutcome` | `WorkflowEngineTest.testNodeRetriedExactlyMaxAttemptsTimesThenTransitionsToFailed` |
@@ -163,15 +166,30 @@ not currently re-recorded against the live model.
 
 ## Limitations
 
-Full list in [docs/design.md](docs/design.md). The three most load-bearing:
+Full list in [docs/design.md](docs/design.md). Named here first, not left for a
+reviewer to find:
 
+- **All three scenarios stop at REQUIREMENT, node 1 of 8, and this is the honest,
+  current result, not a placeholder for one.** REQUIREMENT's exit gate requires zero
+  open questions; a live model, told exactly what its last attempt failed to address,
+  reliably closes that gap and finds a new one underneath, verified twice: amending
+  `greenfield`'s requirement to answer five real gaps a live retry found led directly to
+  a live retry finding six more. A bounded retry budget cannot resolve genuine ambiguity
+  by itself, because resolution needs a human decision, not another model pass, so the
+  run correctly exhausts and safe-stops rather than guessing a policy. See
+  [docs/design.md](docs/design.md) section 3.2 for both live runs and what a better exit
+  gate (blocking versus non-blocking open questions, not implemented, to avoid loosening
+  a control just to force green) would look like.
+- **Separately, TEST does not currently pass for `greenfield` either**, on a real,
+  live, two-attempt basis: IMPACT, DESIGN, and IMPLEMENT all pass their real gates
+  (including a real compile), but the model's written test does not compile or pass
+  target-service's real build. See [docs/design.md](docs/design.md) section 3.2a.
 - **A real CLI wiring gap** meant `brownfield` and `ambiguous` could never reach
-  REQUIREMENT's real fixture at all before it was found and fixed late in this build.
-- **Fixtures are replay-by-default**, and re-recording all of them against a live model
-  needs API credit this build did not spend; the retry-path fixtures for all three
-  scenarios are stale as a direct, understood consequence, and the quickstart's own
-  strict-graph run currently ends in a crash on that stale retry fixture, not a clean
-  stop, as stated above.
+  REQUIREMENT's real fixture at all before it was found and fixed in spec 09, and a
+  separate, later bug (`.gradle/` leaking into IMPACT's file inventory) would have made
+  any re-recording of IMPACT non-reproducible from a clone had it not been found and
+  fixed before spending credit on it. Both are documented in
+  [docs/design.md](docs/design.md) sections 3.1 and 3.2c.
 - **A two-hour connection stall** during live testing led directly to the request
   timeout now in `AnthropicClient`.
 
@@ -181,7 +199,8 @@ Full list in [docs/design.md](docs/design.md). The three most load-bearing:
 orchestrator/     Zero-dependency Java 21. Builds with javac, no Maven, no network.
 target-service/   Spring Boot URL shortener (Postgres via JPA, H2 for tests). The codebase agents modify.
 workflows/        DAG definitions as JSON data. Not code.
-scenarios/        Requirement inputs for the three demo scenarios.
+scenarios/        Requirement inputs for the three demo scenarios, plus _smoke/, a
+                  stable, dedicated input for the CLI smoke test only (see Quickstart).
 runs/             Generated per-run artifacts. Git-ignored except the four committed demo runs above.
 specs/            Task specs, one per unit of work, in the order they were implemented.
 docs/             Design, decisions, and this engineering summary.
