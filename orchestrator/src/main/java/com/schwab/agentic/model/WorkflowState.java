@@ -57,6 +57,13 @@ public final class WorkflowState {
     private RequirementSpec requirementSpec;
     private WorkflowStatus workflowStatus;
     private int rollbackCount;
+    // Deliberately not part of persisted state: this is an in-memory-only hook for a
+    // caller (the CLI, in practice) to observe real audit events as they are created,
+    // for live progress output. It is never read by toJson/fromJson, so a resumed run
+    // in a fresh process starts with no listener attached, exactly as it should: the
+    // listener belongs to a running process watching this instance, not to the run
+    // itself.
+    private volatile java.util.function.Consumer<AuditEvent> auditListener;
     private int replanCount;
 
     /**
@@ -165,7 +172,7 @@ public final class WorkflowState {
 
     private AuditEvent newAuditEvent(String nodeId, AuditEvent.EventType type, NodeStatus from, NodeStatus to,
                                       String actor, String reason, Map<String, Object> details) {
-        return AuditEvent.create(
+        AuditEvent event = AuditEvent.create(
             sequence.incrementAndGet(),
             runId,
             nodeId,
@@ -176,6 +183,28 @@ public final class WorkflowState {
             reason,
             details,
             Instant.now());
+        java.util.function.Consumer<AuditEvent> listener = auditListener;
+        if (listener != null) {
+            listener.accept(event);
+        }
+        return event;
+    }
+
+    /**
+     * Registers a callback invoked with every real {@link AuditEvent} exactly as it is
+     * created, from the same single choke point {@link #transition}, {@link
+     * #record(AuditEvent.EventType, String, String, Map)}, and {@link
+     * #record(AuditEvent.EventType, String, String, String, Map)} already use to build
+     * one: nothing this listener sees can be a narrated event distinct from what actually
+     * gets appended to the audit log, since it receives the identical object. Intended
+     * for live progress output (the CLI prints a line per event as a run executes,
+     * instead of only a summary once {@code engine.run()} returns); a listener that
+     * throws propagates out of whichever {@code transition}/{@code record} call
+     * triggered it, so a broken listener fails loudly rather than silently swallowing a
+     * real audit event. Pass {@code null} to remove a previously registered listener.
+     */
+    public void setAuditListener(java.util.function.Consumer<AuditEvent> listener) {
+        this.auditListener = listener;
     }
 
     public String getRunId() {

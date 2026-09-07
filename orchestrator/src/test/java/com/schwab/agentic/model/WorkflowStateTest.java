@@ -343,6 +343,41 @@ public class WorkflowStateTest {
             "replacing with a non-increasing revision must be rejected");
     }
 
+    /**
+     * The listener must receive the identical {@link AuditEvent} instance a reader of
+     * {@link WorkflowState#getAuditLog} would see, in the same order, not a summary or a
+     * separately-constructed description: this is what lets the CLI's live progress
+     * output (Main.java's {@code attachProgressListener}) never say anything that is not
+     * exactly what got persisted.
+     */
+    public void testAuditListenerReceivesTheSameEventInstancesInOrderAsTheAuditLog() {
+        WorkflowState state = new WorkflowState("RUN-1", TestFixtures.requirementSpec(),
+            List.of(TestFixtures.node("N1")));
+        List<AuditEvent> observedByListener = new java.util.ArrayList<>();
+        state.setAuditListener(observedByListener::add);
+
+        state.transition("N1", NodeStatus.RUNNING, "engine", "starting");
+        state.record(AuditEvent.EventType.COMMAND_EXECUTED, "N1", "engine", "ran a command", Map.of());
+        state.transition("N1", NodeStatus.COMPLETED, "engine", "done");
+
+        assertEquals(state.getAuditLog(), observedByListener,
+            "the listener must observe exactly the events that landed in the real audit log, in the same order");
+    }
+
+    /** Passing null removes a previously registered listener rather than throwing or leaking the old one. */
+    public void testAuditListenerCanBeRemovedByPassingNull() {
+        WorkflowState state = new WorkflowState("RUN-1", TestFixtures.requirementSpec(),
+            List.of(TestFixtures.node("N1")));
+        List<AuditEvent> observed = new java.util.ArrayList<>();
+        state.setAuditListener(observed::add);
+        state.transition("N1", NodeStatus.RUNNING, "engine", "starting");
+        assertEquals(1, observed.size(), "listener must fire while registered");
+
+        state.setAuditListener(null);
+        state.transition("N1", NodeStatus.COMPLETED, "engine", "done");
+        assertEquals(1, observed.size(), "no further events must reach a removed listener");
+    }
+
     public void testTransitionRejectsANodeThatDoesNotBelongToThisState() {
         WorkflowState state = new WorkflowState("RUN-1", TestFixtures.requirementSpec(),
             List.of(TestFixtures.node("N1")));

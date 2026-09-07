@@ -132,6 +132,10 @@ public final class Main {
             "REQ-" + runId, 1, "placeholder pending RequirementExecutor", "placeholder",
             List.<AcceptanceCriterion>of());
         WorkflowState state = new WorkflowState(runId, placeholderSpec, graph.getAllNodes());
+        attachProgressListener(state);
+
+        System.out.println("Starting run " + runId + " (" + (live ? "LIVE" : "REPLAY")
+            + (autoApprove ? ", auto-approve" : "") + ")");
 
         String scenarioName = scenarioNameFrom(requirementPath);
         WorkflowEngine engine = buildEngine(graph, state, runsDirectory, fixturesDirectory, targetServiceDirectory,
@@ -139,10 +143,33 @@ public final class Main {
         engine.withInitialContext("REQUIREMENT", Map.of("requirementPath", requirementPath.toString()));
         seedCrossNodeContext(engine, runsDirectory, runId, targetServiceDirectory);
 
-        System.out.println("Starting run " + runId + " (" + (live ? "LIVE" : "REPLAY")
-            + (autoApprove ? ", auto-approve" : "") + ")");
         WorkflowStatus outcome = engine.run();
         reportOutcome(runId, outcome, state);
+    }
+
+    /**
+     * Prints one line per real {@link com.schwab.agentic.model.AuditEvent} as the engine
+     * produces it, instead of only a summary once {@code engine.run()} returns. A live
+     * run against a real model can take minutes per stage; without this, the terminal
+     * shows nothing at all between "Starting run" and the final status, which is
+     * indistinguishable from a hang. Driven by {@link WorkflowState#setAuditListener}, so
+     * every printed line corresponds to an event that was actually appended to the audit
+     * log, in the same order, with the same reason text: nothing here is narrated
+     * separately from what really happened.
+     */
+    private static void attachProgressListener(WorkflowState state) {
+        java.time.format.DateTimeFormatter clockFormat = java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss")
+            .withZone(java.time.ZoneId.systemDefault());
+        state.setAuditListener(event -> {
+            String timestamp = clockFormat.format(event.timestamp());
+            if (event.type() == com.schwab.agentic.model.AuditEvent.EventType.STATUS_CHANGE) {
+                System.out.println("[" + timestamp + "] " + event.nodeId() + ": " + event.from() + " -> " + event.to()
+                    + (event.reason() == null || event.reason().isBlank() ? "" : "  (" + event.reason() + ")"));
+            } else {
+                String scope = event.nodeId() == null ? "" : event.nodeId() + " ";
+                System.out.println("[" + timestamp + "] " + scope + event.type() + ": " + event.reason());
+            }
+        });
     }
 
     /**
@@ -369,6 +396,7 @@ public final class Main {
             throw new IllegalStateException("Failed to read " + statePath, e);
         }
         WorkflowState state = WorkflowState.fromJsonString(stateJson);
+        attachProgressListener(state);
         WorkflowStatus statusBeforeResume = state.getWorkflowStatus();
 
         WorkflowGraph graph = WorkflowGraph.loadFromFile(workflowPath);

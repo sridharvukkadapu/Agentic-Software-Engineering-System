@@ -19,6 +19,13 @@ no API key. (`target-service` additionally uses its bundled Gradle wrapper, but 
 quickstart below does not touch it.) `scripts/build.sh` checks the version and fails with
 a clear message if it finds an older JDK.
 
+`run` and `resume` print one line per real audit event as the engine produces it, not
+only a summary once the run ends, so a `--live` run against a real model (which can take
+minutes per stage) shows visible progress rather than silence. Every printed line is
+driven by the same event that gets persisted to `state.json`, via
+`WorkflowState.setAuditListener`, so nothing on screen can drift from what actually
+happened.
+
 **1. Smoke test.** Proves the build, the scheduler, entry/exit gates, the audit log, and
 real artifact writing all work from a clean clone, no key, no network. This is a
 two-node graph (REQUIREMENT then DOCUMENT), not the governance graph, stated here
